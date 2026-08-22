@@ -59,9 +59,15 @@ def _post(url, payload, pace):
         if r.status_code == 400 and payload.get("parse_mode") == "Markdown":
             p2 = dict(payload); p2.pop("parse_mode", None)
             return _post(url, p2, pace)
+        if not r.ok:
+            # LOUDLY report failures (previously swallowed -> silent no-message)
+            print(f"[TELEGRAM-ERR] sendMessage HTTP {r.status_code}: {r.text[:300]}")
+        else:
+            print(f"[TELEGRAM-OK] sendMessage -> chat {payload.get('chat_id')}")
         time.sleep(pace)
         return r.json()
     except requests.RequestException as e:
+        print(f"[TELEGRAM-ERR] sendMessage network failure: {e}")
         return {"ok": False, "error": str(e)}
 
 
@@ -82,9 +88,14 @@ def _post_files(url, data, files, pace):
         if r.status_code == 400 and data.get("parse_mode") == "Markdown":
             d2 = dict(data); d2.pop("parse_mode", None)
             return _post_files(url, d2, files, pace)
+        if not r.ok:
+            print(f"[TELEGRAM-ERR] sendPhoto HTTP {r.status_code}: {r.text[:300]}")
+        else:
+            print(f"[TELEGRAM-OK] sendPhoto -> chat {data.get('chat_id')}")
         time.sleep(pace)
         return r.json()
     except requests.RequestException as e:
+        print(f"[TELEGRAM-ERR] sendPhoto network failure: {e}")
         return {"ok": False, "error": str(e)}
 
 
