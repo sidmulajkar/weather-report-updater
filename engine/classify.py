@@ -81,6 +81,8 @@ class RiskResult:
     terrain_zone: str = "PLAIN"
     modeled_gust_kmh: float = 0.0
     modeled_rain_mm: float = 0.0
+    tidal_watch: bool = False  # informational only: lock present but NOT paired
+                             # with heavy rain -> no level escalation, just monitoring
 
 
 def classify(accum_24h, prob_max, model_spread, imd=None, *,
@@ -169,25 +171,34 @@ def classify(accum_24h, prob_max, model_spread, imd=None, *,
         level = "ADVISORY"
         reasons.append("proximity threat vector from neighbouring cells")
 
-    # ---- Mumbai tidal-lock escalation (drainage gate closure) ----
-    # CONSERVATIVE: a lock compounds a modest rain into a higher alert, but must
-    # NOT independently push a light shower to CRITICAL. Rule:
-    #   lock present            -> +1 level, CAP WARNING
-    #   lock + rain already heavy (>= Yellow 24h OR burst >=30mm/h)
-    #                          -> may reach CRITICAL
-    # This prevents false CRITICALs at 9-13mm just because of a spring tide.
+    # ---- Mumbai tidal-lock interaction (drainage gate closure) ----
+    # DESIGN RULE (commercial credibility): a tidal lock is a CONDITIONAL
+    # modifier, NOT an independent level-raiser. A 5 m spring tide is a real
+    # physical constraint, but it only creates a true operational emergency
+    # when PAIRED with heavy cloudburst volumes. On a light-rain day the lock
+    # must NOT produce a WARNING/CRITICAL (that is a false alarm). So:
+    #   lock + rain already heavy (>= Yellow 24h OR burst >=30 mm/h)
+    #        -> escalates (WARNING, or CRITICAL if very heavy)
+    #   lock + light rain only
+    #        -> NO level change. Set tidal_watch=True (informational): drains
+    #           temporarily lock at high tide; minor low-lying pooling possible;
+    #           no operational downtime. This protects credibility.
+    # NOTE (honesty): tide heights are Mumbai-chart-datum proxy + datum-unverified;
+    # we never emit a precise invented height in client output.
     tidal = tidal or {}
     tidal_lock = tidal.get("lock")
     tidal_mult = _safe(tidal.get("multiplier"), 1.0)
+    tidal_watch = False
     rain_already_heavy = (acc >= eff_thr["yellow"]) or (max1h >= 30.0)
-    if tidal_lock and base_level_rank[level] < 2:
+    if tidal_lock:
         if rain_already_heavy:
-            level = "CRITICAL"
+            if base_level_rank[level] < 2:
+                level = "CRITICAL" if acc >= eff_thr["red"] else "WARNING"
+            reasons.append(f"tidal {tidal_lock} + heavy rain at peak hour -> drainage lock escalation")
         else:
-            # cap at WARNING: a lock compounds, but never forces CRITICAL
-            # on its own from light rain
-            level = "WARNING"
-        reasons.append(f"tidal {tidal_lock} at peak rain hour -> drainage lock escalation")
+            # light rain only: informational monitoring, NOT an alert level
+            tidal_watch = True
+            reasons.append(f"tidal {tidal_lock}: drains lock at high tide (light rain) -> monitoring only, no downtime")
 
     # ---- IMD radar imminent convective (sub-km, live) ----
     radar = radar or {}
@@ -226,6 +237,7 @@ def classify(accum_24h, prob_max, model_spread, imd=None, *,
         effective_thresholds=eff_thr, proximity_vector=prox_vector,
         proximity_threats=prox_threats, directive=directive,
         escalation_reasons=reasons, tidal_lock=tidal_lock, tidal_mult=tidal_mult,
+        tidal_watch=tidal_watch,
         radar_flag=radar_flag, terrain_zone=terrain_zone,
         modeled_gust_kmh=modeled_gust, modeled_rain_mm=modeled_rain,
     )

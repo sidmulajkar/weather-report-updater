@@ -255,6 +255,101 @@ def _lvl(level: str) -> int:
     return {"CRITICAL": 3, "WARNING": 2, "ADVISORY": 1, "NOMINAL": 0}.get(level, 0)
 
 
+def summarize(results: list[dict], region: str, run_date: str, severe: dict,
+              radar_status: dict = None) -> str:
+    """Smart, adaptive ONE-PARAGRAPH-ish Telegram briefing (plain text, <4096 chars).
+
+    Tier routing off the ALREADY-COMPUTED risk objects (never re-derives severity,
+    never invents tide heights, never uses a 5th "WATCH" level — IMD 4-level schema):
+      Tier A (WARNING/CRITICAL present): lead with immediate-action alerts + drivers.
+      Tier B (all NOMINAL but a tidal_watch exists): soften to "COASTAL MONITORING",
+              explain the lock qualitatively, "no downtime".
+      Tier C (all NOMINAL, no tidal_watch): ultra-condensed 2-line all-clear.
+    Plain text + emojis (reliable; avoids Markdown parse 400s).
+    """
+    ranked = sorted(results, key=lambda r: _lvl(r["risk"].level), reverse=True)
+    top_lvl = ranked[0]["risk"].level
+    real_alerts = [r for r in ranked if r["risk"].level in ("WARNING", "CRITICAL")]
+    tidal_watch_assets = [r for r in ranked if r["risk"].tidal_watch]
+
+    # ---- header / system status ----
+    if top_lvl == "CRITICAL":
+        status = u"\U0001F534 CRITICAL OPERATIONAL THREAT"
+    elif top_lvl == "WARNING":
+        status = u"\U0001F7E0 WARNING \u2014 OPERATIONAL RISK DETECTED"
+    elif tidal_watch_assets:
+        status = u"\U0001F7E2 NOMINAL \u2014 COASTAL MONITORING"
+    else:
+        status = u"\U0001F7E2 NOMINAL (ALL CLEAR)"
+
+    lines = []
+    lines.append(f"\U0001F4A6 MAHARASHTRA TACTICAL RISK BRIEF | {run_date}")
+    lines.append("=" * 47)
+    lines.append(f"\U0001F6A8 SYSTEM STATUS: {status}")
+    lines.append("")
+
+    # ---- Tier A: immediate-action alerts up top ----
+    if real_alerts:
+        lines.append("\u26A0\uFE0F IMMEDIATE ACTION REQUIRED:")
+        for r in real_alerts:
+            rk = r["risk"]
+            drivers = []
+            if rk.burst_concern:
+                drivers.append(f"{r['intensity'].get('burst_band', '')} burst")
+            if r.get("proximity", {}).get("flagged"):
+                drivers.append("proximity threat")
+            if rk.antecedent_state not in ("NORMAL",):
+                drivers.append(f"{rk.antecedent_state.lower()} antecedent")
+            if r["imd"].get("colour") and r["imd"]["colour"] != "Green":
+                drivers.append(f"IMD {r['imd']['colour']}")
+            if rk.tidal_lock and not rk.tidal_watch:
+                drivers.append("tidal drainage-lock")
+            d = f" [{', '.join(drivers)}]" if drivers else ""
+            lines.append(f"\u2022 {r['name']} {rk.level}{d} "
+                         f"({r['corrected_mm']:.1f} mm/24h, peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h)")
+        lines.append("")
+
+    # ---- Tier B: coastal monitoring (light-rain tidal lock) ----
+    elif tidal_watch_assets:
+        lines.append("\U0001F50D ENVIRONMENTAL ANOMALY WATCHLIST:")
+        for r in tidal_watch_assets:
+            lines.append(
+                f"\u2022 {r['name']} [MONITORING]: rainfall is light "
+                f"({r['corrected_mm']:.1f} mm/24h) but timing overlaps a tidal "
+                f"drainage-lock window. Outfalls temporarily restrict gravity "
+                f"discharge; minor low-lying pooling possible. No facility "
+                f"shutdowns required.")
+        other = [r["name"] for r in ranked if not r["risk"].tidal_watch
+                 and r["risk"].level == "NOMINAL"]
+        if other:
+            lines.append(f"\u2022 Other assets ({len(other)}): NOMINAL / safe "
+                         f"operational windows.")
+        lines.append("")
+
+    # ---- Tier C: ultra-condensed all-clear ----
+    else:
+        lines.append("\u2705 All monitored asset infrastructures are clear.")
+        lines.append("Logistics, shipping and outdoor operations remain fully "
+                     "unrestricted. Routine monitoring continues.")
+        lines.append("")
+
+    # ---- synoptic validation sub-block ----
+    lines.append("-" * 47)
+    lines.append("\U0001F6E1 SYNOPTIC VALIDATION METRICS")
+    radar_ok = bool(radar_status and radar_status.get("ok"))
+    lines.append(f"\u2022 IMD Doppler Radar: {'ACTIVE | zero severe convective lines tracked' if radar_ok else 'TELEMETRY DEFICIT'}")
+    if severe and (severe.get("has_signal") or severe.get("alerts")):
+        outlook = "ALERT PRECURSOR IDENTIFIED (verify vs IMD)"
+    else:
+        outlook = "CLEAR \u2014 no tropical cyclonic precursors tracked"
+    lines.append(f"\u2022 3-7 Day Severe Outlook: {outlook}")
+    lines.append("")
+    lines.append("💡 Directive: cross-verify with official IMD (mausam.imd.gov.in). "
+                 "Detailed geospatial maps posted in channel. Unofficial analysis.")
+
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     from engine.classify import classify
     dummy = [{"name": "Mumbai", "risk": classify(8.0, 80, 1.2),

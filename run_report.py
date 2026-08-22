@@ -322,8 +322,12 @@ def main():
         f.write(text + "\n")
     print(f"[*] report saved -> {os.path.join(OUT, 'report.md')}")
 
-    # deliver
-    telegram.send_message(CHAT, text, dry_run=DRY)
+    # deliver — concise one-paragraph summary as the chat text (Telegram's
+    # 4096-char limit rejects the full report; full report stays in report.md).
+    summary = report.summarize(results, cfg.get("region_focus", "Maharashtra"),
+                                today, sev, radar_status)
+    print(f"[*] telegram text length: {len(summary)} chars (limit 4096)")
+    telegram.send_message(CHAT, summary, dry_run=DRY)
     telegram.send_photo(CHAT, p_rain, caption="Rainfall forecast (24h, bias-corrected)", dry_run=DRY)
     telegram.send_photo(CHAT, p_wind, caption="Wind field (10 m)", dry_run=DRY)
     telegram.send_photo(CHAT, p_w850, caption="Upper-air wind (850 hPa)", dry_run=DRY)
