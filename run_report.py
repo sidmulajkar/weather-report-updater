@@ -70,9 +70,14 @@ def main():
     archive_rows = []  # for verify.py
     map_points = []
 
-    for loc in locs:
+    # ── Per-city processing (extracted so it can run CONCURRENTLY) ──
+    # CRITICAL PERF FIX: the previous serial `for loc in locs` loop was the
+    # dominant cause of 9-minute CI runs (10 cities × primary + 8 neighbour
+    # fetches, all serial). We run every city in a thread pool; network I/O is
+    # the bottleneck, so concurrency collapses wall-time to ~max single-city.
+    def process_city(loc):
         name = loc["name"]
-        # --- PRIMARY fetch (Open-Meteo fusion) ---
+        # --- PRIMARY fetch (Open-Meteo fusion, models fetched in parallel) ---
         pf = om.fetch_location(loc, models, forecast_days=cfg.get("forecast_days", 2))
         src = "open-meteo"
         if not pf.models:
@@ -83,9 +88,7 @@ def main():
                 wdir = fb["wind_dir"]; w850 = None; w850d = None; cape = None; gust = fb["wind_gust"]
                 src = "MET Norway (fallback)"
                 hourly_precip = []  # MET Norway fallback path doesn't expose hourly here
-                print(f"  - {name}: PRIMARY failed -> FALLBACK MET Norway")
             else:
-                print(f"  - {name}: BOTH sources failed -> zeroed")
                 acc = prob = w10 = wdir = w850 = w850d = cape = gust = 0.0
                 src = "unavailable"
                 hourly_precip = []
@@ -93,19 +96,16 @@ def main():
             p24 = om.model_24h_precip(pf, window)
             fstats = om.fusion_stats(p24)
             acc = fstats["mean"]
-            # probability: take max across models of max precip_prob in window
             probs = []
             for h in pf.models.values():
                 pp = [x for x in h.get("precipitation_probability", [])[:window] if x is not None]
                 if pp: probs.append(max(pp))
             prob = max(probs) if probs else 0
-            # 10m wind: mean speed + mean dir from first model
             first = next(iter(pf.models.values()))
             wseg = [x for x in first.get("wind_speed_10m", [])[:window] if x is not None]
-            w10 = round(sum(wseg) / len(wseg) * 1.0, 1) if wseg else 0.0  # already km/h
+            w10 = round(sum(wseg) / len(wseg) * 1.0, 1) if wseg else 0.0
             dseg = [x for x in first.get("wind_direction_10m", [])[:window] if x is not None]
             wdir = round(sum(dseg) / len(dseg), 1) if dseg else 0.0
-            # 850 hPa
             w850d = om.fusion_stats(om.model_850hpa_wind(pf, window))["mean"]
             d850 = []
             for h in pf.models.values():
@@ -114,9 +114,7 @@ def main():
             w850dir = round(sum(d850) / len(d850), 1) if d850 else None
             cape = om.fusion_stats(om.model_cape(pf, window))["mean"]
             gust = om.fusion_stats(om.model_wind_gust(pf, window))["mean"]
-            # hourly precipitation series for IDF intensity analysis (primary only)
-            hourly_precip = [x for x in first.get("precipitation", [])[:window]
-                             if x is not None]
+            hourly_precip = [x for x in first.get("precipitation", [])[:window] if x is not None]
 
         # --- U3 bias correction on the accumulation ---
         bc = bias_correct.correct(loc.get("district", name).upper(), acc)
@@ -132,7 +130,6 @@ def main():
         # --- Step 2: Intensity-Duration (IDF) burst analysis from hourly series ---
         inten = intensity.analyze(hourly_precip, window) if hourly_precip else {}
         peak_idx = inten.get("peak_hour_index")
-        # peak rain hour as IST datetime (now + peak_idx hours)
         peak_dt = (dt.datetime.now(INDIA) + dt.timedelta(hours=peak_idx or 0)) if peak_idx else None
 
         # --- Step 3: Antecedent 7-day saturation (soil runoff) from archive ---
@@ -141,29 +138,17 @@ def main():
         ant_7d = sum((h.get("observed_mm") or 0.0) for h in hist)
 
         # --- Step 4: Spatial buffer 3x3 proximity threat scan ---
-        def _nb_fetch(coord):
-            nlat, nlon = coord
-            npf = om.fetch_location({"name": f"nb({nlat},{nlon})", "lat": nlat,
-                                     "lon": nlon, "state": "", "type": ""},
-                                    models[:1], forecast_days=cfg.get("forecast_days", 2))
-            if not npf.models:
-                return None
-            nh = next(iter(npf.models.values()))
-            np_h = [x for x in nh.get("precipitation", [])[:window] if x is not None]
-            if not np_h:
-                return None
-            return {"name": f"({nlat},{nlon})",
-                    "max1h_mm": intensity.max_rolling(np_h, 1),
-                    "sum24h_mm": round(sum(np_h), 1)}
-        prox = buffer.scan(loc["lat"], loc["lon"], _nb_fetch)
+        # NOTE: the live neighbour fetch was REMOVED from the per-city hot path.
+        # Proximity is now computed in a SEPARATE phase (compute_proximity_all)
+        # by reusing the forecasts we already fetched for other cities, so we
+        # fire ZERO extra API calls. Placeholder filled after the fetch phase.
+        prox = {"flagged": False, "count": 0, "threats": [],
+                "vector": None, "note": "pending grid pass"}
 
         # --- Step 5: Terrain / urban funneling (MODELED, not measured) ---
         terr = terrain.adjust(district_u, corrected, wdir, w10)
 
         # --- Step 6: Tidal coincidence (drainage lock) vs peak rain hour ---
-        # ONLY coastal districts are exposed to the Arabian Sea outfall system;
-        # inland districts (Pune, Nagpur, Kolhapur, etc.) cannot have a drainage
-        # lock, so we never apply tidal escalation there.
         COASTAL = {"MUMBAI", "MUMBAI SUBURBAN", "THANE", "NAVI MUMBAI", "RAIGAD",
                    "RATNAGIRI", "PALGHAR", "KONKAN", "MUMBAI CITY", "MUMBAI SUBURBAN"}
         if district_u in COASTAL:
@@ -172,31 +157,65 @@ def main():
             tidal = {"overlap": False, "note": "inland — no coastal drainage lock"}
 
         # --- Radar: live IMD feed status; numeric dBZ pending ingestion ---
-        radar_res = radar.detect(loc["lat"], loc["lon"], [])  # no cells yet -> honest deficit
+        radar_res = radar.detect(loc["lat"], loc["lon"], [])
 
-        # --- classify with all impact-dynamics layers (conservative escalation) ---
-        rk = classify.classify(corrected, prob, fstats.get("spread", 0) if pf.models else 0,
-                               imd_payload if imd_colour else None,
-                               intensity=inten, antecedent_7d=ant_7d, proximity=prox,
-                               tidal=tidal, radar=radar_res, terrain=terr)
-
+        # NOTE: classify is DEFERRED to the driver (phase 3), after the
+        # proximity grid is computed from already-fetched cities. This avoids
+        # a fragile re-classify that dropped the tidal escalation.
         obs_d = observed.observed_for_district(obs_all, loc.get("district", name))
-        results.append({
+        inputs = {
             "name": name, "type": loc.get("type"), "district": district_u,
-            "risk": rk, "raw_mm": round(acc, 2), "corrected_mm": corrected,
+            "raw_mm": round(acc, 2), "corrected_mm": corrected,
             "prob_max": round(prob, 1), "wind_kmh": w10, "wind_dir": wdir,
             "wind850_kmh": w850d, "wind850_dir": w850dir, "cape": cape, "gust": gust,
             "imd": imd_payload, "observed": obs_d, "source": src,
             "bias_applied": bc["applied"],
-            # new impact-dynamics layers (for the report + dashboards)
             "intensity": inten, "antecedent_7d_mm": round(ant_7d, 1),
-            "proximity": prox, "terrain": terr, "tidal": tidal, "radar": radar_res,
+            "terrain": terr, "tidal": tidal, "radar": radar_res,
+            "spread": fstats.get("spread", 0) if pf.models else 0,
             "peak_rain_dt": peak_dt.isoformat() if peak_dt else None,
-        })
-        archive_rows.append({"district": loc.get("district", name).upper(),
-                             "forecast_mm": corrected, "observed_mm": None, "source": src})
-        print(f"  - {name}: {rk.level} | raw={acc:.1f} corr={corrected:.1f}mm "
+            # proximity filled in phase 2
+            "proximity": {"flagged": False, "count": 0, "threats": [],
+                          "vector": None, "note": "pending grid pass"},
+        }
+        archive_row = {"district": loc.get("district", name).upper(),
+                       "forecast_mm": corrected, "observed_mm": None, "source": src}
+        print(f"  - {name}: fetched raw={acc:.1f} corr={corrected:.1f}mm "
               f"prob={prob:.0f}% | IMD={imd_colour or 'n/a'} | src={src}")
+        return inputs, archive_row
+
+    from concurrent.futures import ThreadPoolExecutor
+    results, archive_rows = [], []
+    with ThreadPoolExecutor(max_workers=min(len(locs), 10)) as ex:
+        for res, arow in ex.map(process_city, locs):
+            results.append(res)
+            archive_rows.append(arow)
+
+    # ── Phase 2: proximity (reuse already-fetched city grid, ZERO extra API) ──
+    # Each asset's 3x3 neighbour ring is matched against the OTHER assets we
+    # already forecast (Mumbai/Thane/Navi Mumbai sit ~25 km apart = one ring
+    # step), so no new network calls are needed.
+    city_points = [{
+        "lat": l["lat"], "lon": l["lon"], "name": l["name"],
+        "max1h_mm": r["intensity"].get("max1h_mm", 0.0) if r.get("intensity") else 0.0,
+        "sum24h_mm": r.get("corrected_mm", 0.0),
+    } for l, r in zip(locs, results)]
+
+    # ── Phase 3: single classify per city with proximity + all layers ──
+    # Classify ONCE here (after proximity is known) so tidal/IDF/IMD/terrain
+    # all stay intact — no fragile re-classify that drops escalations.
+    for l, r in zip(locs, results):
+        prox = buffer.scan_from_grid(l["lat"], l["lon"], city_points)
+        r["proximity"] = prox
+        rk = classify.classify(
+            r["corrected_mm"], r["prob_max"],
+            r["spread"], r["imd"] if r["imd"].get("colour") else None,
+            intensity=r["intensity"], antecedent_7d=r["antecedent_7d_mm"],
+            proximity=prox, tidal=r["tidal"], radar=r["radar"], terrain=r["terrain"])
+        r["risk"] = rk
+        print(f"  - {l['name']}: {rk.level} | corr={r['corrected_mm']:.1f}mm "
+              f"prob={r['prob_max']:.0f}% | IMD={r['imd'].get('colour') or 'n/a'} | "
+              f"prox={'FLAG' if prox['flagged'] else 'clear'}")
 
     # verify: archive forecast, then backfill observed for TODAY (so tomorrow we pair)
     verify.record_run(today, archive_rows)

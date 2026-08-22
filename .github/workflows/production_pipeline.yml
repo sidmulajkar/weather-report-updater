@@ -22,7 +22,7 @@ on:
 jobs:
   execute_forecasting_matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - name: Codebase Ingestion
         uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
       - name: Resolve System Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --prefer-binary -r requirements.txt
 
       - name: Execute Local Validation Assertions
         # Real gate: sim_scenarios.py returns non-zero exit on ANY failure.

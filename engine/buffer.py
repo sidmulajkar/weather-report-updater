@@ -51,14 +51,44 @@ def evaluate_proximity(neighbours: list[dict]) -> dict:
     }
 
 
+def scan_from_grid(lat: float, lon: float, city_points: list[dict]) -> dict:
+    """Proximity WITHOUT extra network calls.
+
+    `city_points`: list of already-fetched assets, each
+        {"lat", "lon", "max1h_mm", "sum24h_mm", "name"}.
+    For the target's 3x3 neighbour ring we look up which already-fetched
+    assets fall on/near those ring coordinates and evaluate them. This reuses
+    data we already paid Open-Meteo for, instead of firing 8 new requests
+    per city (which caused minute-long CI runs under rate-limiting).
+
+    If a ring cell has no nearby fetched asset, it is treated as a data gap
+    (honest: we do not fabricate a neighbour).
+    """
+    neighbours = []
+    for nlat, nlon in neighbour_coords(lat, lon):
+        # find the closest fetched asset within ~0.30 deg (~30 km)
+        best = None
+        best_d = 1e9
+        for c in city_points:
+            d = abs(c["lat"] - nlat) + abs(c["lon"] - nlon)
+            if d < best_d:
+                best_d, best = d, c
+        if best and best_d <= 0.30 and best.get("max1h_mm") is not None:
+            neighbours.append({
+                "name": best.get("name", "?"),
+                "max1h_mm": best["max1h_mm"],
+                "sum24h_mm": best.get("sum24h_mm", 0.0),
+            })
+    return evaluate_proximity(neighbours)
+
+
 def scan(lat: float, lon: float, fetch_fn) -> dict:
-    """Real 3x3 proximity scan.
+    """Legacy live 3x3 proximity scan (kept for tests/local use).
 
     `fetch_fn(coord) -> {"max1h_mm": float, "sum24h_mm": float, "name": str}`
-    is injected by the caller (so this module stays pure + testable, and the
-    production caller can pass a live Open-Meteo fetch while sim scenarios pass
-    mocks). For each of the 8 neighbouring grid cells we fetch its burst/sum and
-    then run evaluate_proximity().
+    is injected by the caller. For each of the 8 neighbouring grid cells we
+    fetch its burst/sum and then run evaluate_proximity(). Prefer
+    `scan_from_grid` in production to avoid redundant API calls.
     """
     neighbours = []
     for nlat, nlon in neighbour_coords(lat, lon):

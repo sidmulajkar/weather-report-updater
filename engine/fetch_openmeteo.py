@@ -18,6 +18,20 @@ BASE = "https://api.open-meteo.com/v1/forecast"
 HOURLY_VARS = ("precipitation,precipitation_probability,wind_speed_10m,wind_direction_10m,"
                "weather_code,wind_speed_850hPa,wind_direction_850hPa,cape,wind_gusts_10m")
 
+# Polite rate limiter: Open-Meteo is free/keyless and throttles burst traffic.
+# A small floor between calls prevents 429s that otherwise cause long CI backoff.
+import time as _time
+_LAST_CALL = 0.0
+_MIN_GAP_S = 0.25  # <=4 calls/sec; well within Open-Meteo's generous free limit
+
+
+def _rate_limit():
+    global _LAST_CALL
+    wait = _MIN_GAP_S - (_time.monotonic() - _LAST_CALL)
+    if wait > 0:
+        _time.sleep(wait)
+    _LAST_CALL = _time.monotonic()
+
 
 
 @dataclass
@@ -42,6 +56,7 @@ def fetch_point(lat: float, lon: float, model: str, forecast_days: int = 2,
         "forecast_days": forecast_days,
         "timezone": timezone,
     }
+    _rate_limit()  # polite floor to avoid 429 backoff under CI load
     try:
         r = requests.get(BASE, params=params, timeout=timeout)
     except requests.RequestException as e:
@@ -57,12 +72,25 @@ def fetch_point(lat: float, lon: float, model: str, forecast_days: int = 2,
 def fetch_location(loc: dict, models: list[str], forecast_days: int = 2) -> PointForecast:
     pf = PointForecast(name=loc["name"], lat=loc["lat"], lon=loc["lon"],
                        state=loc.get("state", ""), ftype=loc.get("type", ""))
-    for m in models:
-        h = fetch_point(loc["lat"], loc["lon"], m, forecast_days)
-        if h and "_error" not in h:
-            pf.models[m] = h
-        else:
-            pf.error = (pf.error or "") + f" [{m}:{h.get('_error') if h else 'no-data'}]"
+    # CRITICAL PERF FIX: fetch the N models CONCURRENTLY (network I/O bound),
+    # not in a serial for-loop. This preserves per-model spread (used for
+    # confidence) while cutting wall-time ~Nx. On CI runners a serial 3-model
+    # loop was the dominant cause of 9-minute runs.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _one(m):
+        return m, fetch_point(loc["lat"], loc["lon"], m, forecast_days)
+    with ThreadPoolExecutor(max_workers=min(len(models), 4)) as ex:
+        futs = {ex.submit(_one, m): m for m in models}
+        for fut in as_completed(futs):
+            m = futs[fut]
+            try:
+                _m, h = fut.result()   # _one returns (model, hourly_dict)
+            except Exception as e:
+                _m, h = m, {"_error": str(e)}
+            if h and "_error" not in h:
+                pf.models[_m] = h
+            else:
+                pf.error = (pf.error or "") + f" [{_m}:{h.get('_error') if h else 'no-data'}]"
     if not pf.models:
         pf.error = pf.error or "all models failed"
     return pf
