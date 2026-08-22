@@ -305,7 +305,7 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
             if rk.tidal_lock and not rk.tidal_watch:
                 drivers.append("tidal drainage-lock")
             d = f" [{', '.join(drivers)}]" if drivers else ""
-            lines.append(f"\u2022 {r['name']} {rk.level}{d} "
+            lines.append(f"- {r['name']} {rk.level}{d} "
                          f"({r['corrected_mm']:.1f} mm/24h, peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h)")
         lines.append("")
 
@@ -314,7 +314,7 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
         lines.append("\U0001F50D ENVIRONMENTAL ANOMALY WATCHLIST:")
         for r in tidal_watch_assets:
             lines.append(
-                f"\u2022 {r['name']} [MONITORING]: rainfall is light "
+                f"- {r['name']} [MONITORING]: rainfall is light "
                 f"({r['corrected_mm']:.1f} mm/24h) but timing overlaps a tidal "
                 f"drainage-lock window. Outfalls temporarily restrict gravity "
                 f"discharge; minor low-lying pooling possible. No facility "
@@ -322,7 +322,7 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
         other = [r["name"] for r in ranked if not r["risk"].tidal_watch
                  and r["risk"].level == "NOMINAL"]
         if other:
-            lines.append(f"\u2022 Other assets ({len(other)}): NOMINAL / safe "
+            lines.append(f"- Other assets ({len(other)}): NOMINAL / safe "
                          f"operational windows.")
         lines.append("")
 
@@ -337,14 +337,14 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
     lines.append("-" * 47)
     lines.append("\U0001F6E1 SYNOPTIC VALIDATION METRICS")
     radar_ok = bool(radar_status and radar_status.get("ok"))
-    lines.append(f"\u2022 IMD Doppler Radar: {'ACTIVE | zero severe convective lines tracked' if radar_ok else 'TELEMETRY DEFICIT'}")
+    lines.append(f"- IMD Doppler Radar: {'ACTIVE | zero severe convective lines tracked' if radar_ok else 'TELEMETRY DEFICIT'}")
     if severe and (severe.get("has_signal") or severe.get("alerts")):
         outlook = "ALERT PRECURSOR IDENTIFIED (verify vs IMD)"
     else:
         outlook = "CLEAR \u2014 no tropical cyclonic precursors tracked"
-    lines.append(f"\u2022 3-7 Day Severe Outlook: {outlook}")
+    lines.append(f"- 3-7 Day Severe Outlook: {outlook}")
     lines.append("")
-    lines.append("💡 Directive: cross-verify with official IMD (mausam.imd.gov.in). "
+    lines.append("\U0001F4A1 Directive: cross-verify with official IMD (mausam.imd.gov.in). "
                  "Detailed geospatial maps posted in channel. Unofficial analysis.")
 
     return "\n".join(lines)
