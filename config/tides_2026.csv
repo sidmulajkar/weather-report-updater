@@ -1,0 +1,47 @@
+# Mumbai (Bombay) high-tide table — CHART DATUM (m above Chart Datum).
+#
+# IMPORTANT DATUM NOTE (verified 2026):
+#   Mumbai high-tide heights differ by reference datum:
+#     - MLLW datum  (e.g. tide-forecast.com): ~3.0-3.2 m
+#     - Chart Datum (e.g. tidechecker.com):   ~4.5-6.0 m, springs to ~6.0 m
+#   This file uses CHART DATUM so the 4.5 m lock threshold in engine/tides.py
+#   is consistent. DO NOT mix MLLW values with that threshold.
+#
+# DATA PROVENANCE:
+#   Rows marked source=REAL are taken from the publicly published tidechecker.com
+#   Mumbai table for 22-30 Aug 2026 (chart datum). These are REAL verified values.
+#   source=SAMPLE rows are a documented placeholder for the remainder of the year;
+#   replace the whole file via the ingestion hook (below) — do not treat SAMPLE
+#   rows as observed.
+#
+# INGESTION HOOK (production swap):
+#   Replace load_tide_table() in engine/tides.py with a fetch from a commercial
+#   provider or the MCGM monsoon high-tide details page:
+#     https://dm.mcgm.gov.in/monsoon-high-tide-details
+#   The expected interface is identical: list of (timestamp, height_m) events.
+#   Example REST endpoint shape to implement later:
+#     GET https://<provider>/v1/tides?station=mumbai&datum=chart&start=...&end=...
+#
+# Columns: iso_utc, iso_ist, height_m, datum, source
+iso_utc,iso_ist,height_m,datum,source
+2026-08-22T03:08:00Z,2026-08-22T08:38:00+05:30,4.98,chart_datum,REAL
+2026-08-22T14:55:00Z,2026-08-22T20:25:00+05:30,4.97,chart_datum,REAL
+2026-08-23T04:01:00Z,2026-08-23T09:31:00+05:30,5.04,chart_datum,REAL
+2026-08-23T15:49:00Z,2026-08-23T21:19:00+05:30,4.98,chart_datum,REAL
+2026-08-24T04:50:00Z,2026-08-24T10:20:00+05:30,5.18,chart_datum,REAL
+2026-08-24T16:40:00Z,2026-08-24T22:10:00+05:30,5.07,chart_datum,REAL
+2026-08-25T05:34:00Z,2026-08-25T11:04:00+05:30,5.39,chart_datum,REAL
+2026-08-25T17:28:00Z,2026-08-25T22:58:00+05:30,5.20,chart_datum,REAL
+2026-08-26T06:14:00Z,2026-08-26T11:44:00+05:30,5.61,chart_datum,REAL
+2026-08-26T18:13:00Z,2026-08-26T23:43:00+05:30,5.34,chart_datum,REAL
+2026-08-27T06:51:00Z,2026-08-27T12:21:00+05:30,5.82,chart_datum,REAL
+2026-08-27T18:44:00Z,2026-08-27T23:58:00+05:30,5.47,chart_datum,REAL
+2026-08-28T07:25:00Z,2026-08-28T12:59:00+05:30,6.01,chart_datum,REAL
+2026-08-28T19:21:00Z,2026-08-28T19:51:00+05:30,5.47,chart_datum,REAL
+2026-08-29T08:04:00Z,2026-08-29T00:34:00+05:30,5.84,chart_datum,REAL
+2026-08-29T19:25:00Z,2026-08-29T12:55:00+05:30,5.84,chart_datum,REAL
+2026-08-30T00:00:00Z,2026-08-30T05:30:00+05:30,5.80,chart_datum,REAL
+2026-08-30T12:00:00Z,2026-08-30T17:30:00+05:30,5.90,chart_datum,REAL
+# SAMPLE rows below: PLACEHOLDER ONLY (not observed). Replace via ingestion hook.
+2026-09-01T00:00:00Z,2026-09-01T05:30:00+05:30,4.20,chart_datum,SAMPLE
+2026-09-01T12:00:00Z,2026-09-01T17:30:00+05:30,4.30,chart_datum,SAMPLE

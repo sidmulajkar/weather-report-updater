@@ -1,0 +1,18 @@
+{
+  "region_focus": "Maharashtra",
+  "models": ["ecmwf_ifs", "icon_global", "gfs_seamless"],
+  "forecast_days": 2,
+  "accum_window_h": 24,
+  "locations": [
+    {"name": "Mumbai",        "lat": 19.076, "lon": 72.877, "state": "Maharashtra", "district": "MUMBAI SUBURBAN", "type": "coastal"},
+    {"name": "Thane",         "lat": 19.186, "lon": 72.966, "state": "Maharashtra", "district": "THANE", "type": "coastal"},
+    {"name": "Navi Mumbai",   "lat": 19.033, "lon": 73.029, "state": "Maharashtra", "district": "RAIGAD", "type": "coastal"},
+    {"name": "Pune",          "lat": 18.520, "lon": 73.856, "state": "Maharashtra", "district": "PUNE", "type": "inland"},
+    {"name": "Nashik",        "lat": 20.000, "lon": 73.789, "state": "Maharashtra", "district": "NASHIK", "type": "inland"},
+    {"name": "Nagpur",        "lat": 21.146, "lon": 79.087, "state": "Maharashtra", "district": "NAGPUR", "type": "inland"},
+    {"name": "Aurangabad",    "lat": 19.876, "lon": 75.343, "state": "Maharashtra", "district": "AURANGABAD", "type": "inland"},
+    {"name": "Kolhapur",      "lat": 16.706, "lon": 74.243, "state": "Maharashtra", "district": "KOLHAPUR", "type": "inland"},
+    {"name": "Ratnagiri",     "lat": 16.990, "lon": 73.312, "state": "Maharashtra", "district": "RATNAGIRI", "type": "coastal"},
+    {"name": "Solapur",       "lat": 17.660, "lon": 75.906, "state": "Maharashtra", "district": "SOLAPUR", "type": "arid"}
+  ]
+}
