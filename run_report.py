@@ -194,7 +194,12 @@ def main():
 
     from concurrent.futures import ThreadPoolExecutor
     results, archive_rows = [], []
-    with ThreadPoolExecutor(max_workers=min(len(locs), 10)) as ex:
+    # Polite concurrency: the global rate limiter in fetch_openmeteo already
+    # serializes the actual network calls across threads, so a small worker
+    # count is enough. 4 keeps thread overhead low while still parallelizing
+    # any non-network work. (10 caused a thundering herd that Open-Meteo
+    # throttled on CI's shared egress IP -> 8+ min hangs.)
+    with ThreadPoolExecutor(max_workers=min(len(locs), 4)) as ex:
         for res, arow in ex.map(process_city, locs):
             results.append(res)
             archive_rows.append(arow)

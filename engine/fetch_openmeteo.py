@@ -20,17 +20,25 @@ HOURLY_VARS = ("precipitation,precipitation_probability,wind_speed_10m,wind_dire
 
 # Polite rate limiter: Open-Meteo is free/keyless and throttles burst traffic.
 # A small floor between calls prevents 429s that otherwise cause long CI backoff.
+# CRITICAL: this MUST be process-global AND thread-safe. The per-city work runs
+# in a ThreadPoolExecutor, so without a Lock all threads read _LAST_CALL at the
+# same instant, decide "no wait", and fire simultaneously -> thundering herd ->
+# Open-Meteo throttles the shared CI egress IP -> every call hangs to its timeout
+# (seen as 8+ min runs). The Lock serializes the gate across ALL threads.
 import time as _time
+import threading as _threading
 _LAST_CALL = 0.0
-_MIN_GAP_S = 0.25  # <=4 calls/sec; well within Open-Meteo's generous free limit
+_RATE_LOCK = _threading.Lock()
+_MIN_GAP_S = 0.30  # <=~3 calls/sec; comfortably within Open-Meteo's free limit
 
 
 def _rate_limit():
     global _LAST_CALL
-    wait = _MIN_GAP_S - (_time.monotonic() - _LAST_CALL)
-    if wait > 0:
-        _time.sleep(wait)
-    _LAST_CALL = _time.monotonic()
+    with _RATE_LOCK:
+        wait = _MIN_GAP_S - (_time.monotonic() - _LAST_CALL)
+        if wait > 0:
+            _time.sleep(wait)
+        _LAST_CALL = _time.monotonic()
 
 
 
@@ -48,7 +56,7 @@ class PointForecast:
 
 
 def fetch_point(lat: float, lon: float, model: str, forecast_days: int = 2,
-                timezone: str = "Asia/Kolkata", timeout: int = 30) -> Optional[dict]:
+                timezone: str = "Asia/Kolkata", timeout: int = 15) -> Optional[dict]:
     params = {
         "latitude": lat, "longitude": lon,
         "hourly": HOURLY_VARS,
