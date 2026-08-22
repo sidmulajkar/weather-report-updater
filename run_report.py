@@ -204,21 +204,50 @@ def main():
             results.append(res)
             archive_rows.append(arow)
 
-    # ── Phase 2: proximity (reuse already-fetched city grid, ZERO extra API) ──
-    # Each asset's 3x3 neighbour ring is matched against the OTHER assets we
-    # already forecast (Mumbai/Thane/Navi Mumbai sit ~25 km apart = one ring
-    # step), so no new network calls are needed.
-    city_points = [{
-        "lat": l["lat"], "lon": l["lon"], "name": l["name"],
-        "max1h_mm": r["intensity"].get("max1h_mm", 0.0) if r.get("intensity") else 0.0,
-        "sum24h_mm": r.get("corrected_mm", 0.0),
-    } for l, r in zip(locs, results)]
+    # ── Phase 2: proximity — LIVE 3x3 neighbour scan (full original coverage) ──
+    # We restore the original 8-point ring around EVERY asset (not just the
+    # other configured cities) so a burst sitting in a GAP between assets is
+    # still detected — no analytical downgrade. To keep it fast we fetch only
+    # precipitation per neighbour (om.precip_only) concurrently, and the shared
+    # thread-safe rate limiter spaces the calls so Open-Meteo never throttles.
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    _nb_coords = {}
+    for l in locs:
+        _nb_coords[l["name"]] = buffer.neighbour_coords(l["lat"], l["lon"])
+
+    def _nb_probe(coord):
+        nlat, nlon = coord
+        arr = om.precip_only(nlat, nlon, "ecmwf_ifs", cfg.get("forecast_days", 2))
+        if not arr:
+            return None
+        arr = [x for x in arr[:24] if x is not None]
+        if not arr:
+            return None
+        return {"name": f"({nlat},{nlon})",
+                "max1h_mm": intensity.max_rolling(arr, 1),
+                "sum24h_mm": round(sum(arr), 1)}
+
+    _all_nb = {l["name"]: [] for l in locs}
+    with _TPE(max_workers=min(sum(len(c) for c in _nb_coords.values()), 16)) as px:
+        futs = {}
+        for nm, coords in _nb_coords.items():
+            for coord in coords:
+                futs[px.submit(_nb_probe, coord)] = nm
+        for fut in futs:
+            nm = futs[fut]
+            try:
+                res = fut.result()
+            except Exception:
+                res = None
+            if res:
+                _all_nb[nm].append(res)
 
     # ── Phase 3: single classify per city with proximity + all layers ──
     # Classify ONCE here (after proximity is known) so tidal/IDF/IMD/terrain
     # all stay intact — no fragile re-classify that drops escalations.
     for l, r in zip(locs, results):
-        prox = buffer.scan_from_grid(l["lat"], l["lon"], city_points)
+        prox = buffer.evaluate_proximity(_all_nb[l["name"]])
         r["proximity"] = prox
         rk = classify.classify(
             r["corrected_mm"], r["prob_max"],

@@ -77,6 +77,35 @@ def fetch_point(lat: float, lon: float, model: str, forecast_days: int = 2,
     return j["hourly"]
 
 
+def precip_only(lat: float, lon: float, model: str = "ecmwf_ifs",
+                forecast_days: int = 2, timezone: str = "Asia/Kolkata",
+                timeout: int = 15) -> Optional[list]:
+    """Lightweight neighbour fetch: ONLY precipitation (no wind/CAPE/850 etc).
+
+    Used by the 3x3 proximity scan so each neighbour cell costs a tiny request
+    instead of a full multi-variable forecast. Still goes through the shared
+    thread-safe rate limiter, so it never thundering-herds.
+    """
+    params = {
+        "latitude": lat, "longitude": lon,
+        "hourly": "precipitation",
+        "models": model,
+        "forecast_days": forecast_days,
+        "timezone": timezone,
+    }
+    _rate_limit()
+    try:
+        r = requests.get(BASE, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        return None
+    if r.status_code != 200:
+        return None
+    j = r.json()
+    h = j.get("hourly", {})
+    arr = h.get("precipitation")
+    return arr if isinstance(arr, list) else None
+
+
 def fetch_location(loc: dict, models: list[str], forecast_days: int = 2) -> PointForecast:
     pf = PointForecast(name=loc["name"], lat=loc["lat"], lon=loc["lon"],
                        state=loc.get("state", ""), ftype=loc.get("type", ""))

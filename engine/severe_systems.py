@@ -26,9 +26,21 @@ from __future__ import annotations
 import re
 import requests
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+
+# Reuse the SAME thread-safe rate limiter as fetch_openmeteo so ALL Open-Meteo
+# calls (city forecasts + basin MSLP grid) share one polite gate. Without this,
+# the 14-point basin grid (fetched serially before) was the dominant 7-minute
+# CI hang: 28 serial calls x up to 25s timeout on GitHub's congested egress.
+try:
+    from engine.fetch_openmeteo import _rate_limit
+except Exception:  # allow standalone import / tests
+    def _rate_limit():
+        pass
 
 RSMC_GENESIS = "https://rsmcnewdelhi.imd.gov.in/genesis-forecast.php"
 HEADERS = {"User-Agent": "Mozilla/5.0 (weather-updater research; +local)"}
+
 
 # TC-gen search boxes (lat, lon corners) over the two basins
 BASINS = {
@@ -92,7 +104,8 @@ def _fetch_series(lat, lon, days=10):
                     "wind_speed_10m", "cape"],
          "models": "ecmwf_ifs", "forecast_days": days, "timezone": "Asia/Kolkata"}
     try:
-        r = requests.get(url, params=p, timeout=25)
+        _rate_limit()  # share the global polite gate with city forecasts
+        r = requests.get(url, params=p, timeout=15)
         if r.status_code != 200:
             return None
         h = r.json().get("hourly", {})
@@ -123,10 +136,15 @@ def model_genesis_scan(forecast_days: int = 10) -> list[dict]:
     alerts = []
     for basin, grid in BASIN_GRID.items():
         series = {}
-        for (la, lo) in grid:
-            s = _fetch_series(la, lo, forecast_days)
-            if s:
-                series[(la, lo)] = s
+        # CONCURRENT: 14 basin points fetched in parallel (shared rate limiter
+        # still spaces the actual network calls). Was serial -> the 7-min hang.
+        with ThreadPoolExecutor(max_workers=min(len(grid), 7)) as ex:
+            fut_map = {ex.submit(_fetch_series, la, lo, forecast_days): (la, lo) for (la, lo) in grid}
+            for fut in fut_map:
+                la, lo = fut_map[fut]
+                s = fut.result()
+                if s:
+                    series[(la, lo)] = s
         if len(series) < 2:
             continue
         # align lengths
@@ -191,10 +209,14 @@ def build_outlook() -> dict:
     grid_series = {}
     for basin, grid in BASIN_GRID.items():
         gs = {}
-        for (la, lo) in grid:
-            s = _fetch_series(la, lo, 10)
-            if s:
-                gs[(la, lo)] = s
+        # CONCURRENT (same fix as model_genesis_scan): was serial -> 7-min hang.
+        with ThreadPoolExecutor(max_workers=min(len(grid), 7)) as ex:
+            fut_map = {ex.submit(_fetch_series, la, lo, 10): (la, lo) for (la, lo) in grid}
+            for fut in fut_map:
+                la, lo = fut_map[fut]
+                s = fut.result()
+                if s:
+                    gs[(la, lo)] = s
         grid_series[basin] = gs
     lp = low_pressure_belt(grid_series)
 
