@@ -22,24 +22,47 @@ def _build_tide_table(peaks):
 
 
 def scenario_a_drainage_lock():
-    """15 mm rain, but a 4.65 m high tide overlaps the peak rain hour."""
+    """Tidal coincidence must NOT create a false WARNING on light rain,
+    but the burst still escalates and the tide is captured as monitoring."""
     print("\n=== Scenario A — The Drainage Lock ===")
-    # peak rain hour ~ now+3h; high tide at that time, 4.65 m (> HARD lock 5.0? no -> SOFT)
-    # use 5.1 m to guarantee HARD lock per spec (>4.5 breach). Spec says 4.65 -> still >4.5
     from datetime import datetime, timedelta, timezone
     IST = timezone(timedelta(hours=5, minutes=30))
     peak = datetime.now(IST) + timedelta(hours=3)
-    # high tide within window at 4.65 m (charts show springs 4.5-4.8)
     tbl = _build_tide_table([(peak.strftime("%Y-%m-%dT%H:%M:%S%z"), 4.65)])
     tidal = tides.tidal_factor(tbl, peak)
-    rk = classify.classify(15.0, 90, 1.0, None,  # modest 24h volume, no IMD
+
+    # (1) 15 mm/24h + 15 mm/h MODERATE burst + tidal lock.
+    # Old (buggy) behavior: tide alone pushed WARNING. Correct behavior:
+    # burst escalates to ADVISORY; tide is informational (tidal_watch), not the escalator.
+    rk = classify.classify(15.0, 90, 1.0, None,
                            intensity={"max1h_mm": 15.0, "burst_band": "MODERATE",
                                       "escalate": False},
                            tidal=tidal)
-    ok = rk.level in ("CRITICAL", "WARNING") and bool(rk.tidal_lock)
+    burst_escalated = rk.level in ("ADVISORY", "WARNING", "CRITICAL")
+    tide_is_monitoring = (rk.tidal_lock is not None) and (rk.tidal_watch is True)
+    # must NOT be a false WARNING/CRITICAL driven purely by the tide on light rain
+    no_false_critical = rk.level != "CRITICAL"
     print(f"  rain=15mm, tide=4.65m -> level={rk.level}, tidal_lock={rk.tidal_lock}, "
-          f"reasons={rk.escalation_reasons}")
-    print(f"  {PASS if ok else FAIL}: tidal coincidence escalated alert")
+          f"tidal_watch={rk.tidal_watch}")
+    print(f"    burst escalated to >=ADVISORY: {burst_escalated} | "
+          f"tide captured as monitoring (not escalator): {tide_is_monitoring} | "
+          f"no false CRITICAL: {no_false_critical}")
+    ok_a = burst_escalated and tide_is_monitoring and no_false_critical
+
+    # (2) Pure light rain + tidal lock (the Ratnagiri case): must stay NOMINAL,
+    # tidal_watch=True, NO escalation. This guards the anti-false-alarm contract.
+    rk2 = classify.classify(9.4, 95, 1.0, None,
+                             intensity={"max1h_mm": 2.0, "burst_band": "LIGHT",
+                                        "escalate": False},
+                             tidal=tidal)
+    ok_b = (rk2.level == "NOMINAL") and (rk2.tidal_watch is True) and (rk2.tidal_lock is not None)
+    print(f"  rain=9.4mm (light), tide=4.65m -> level={rk2.level}, "
+          f"tidal_watch={rk2.tidal_watch} (must be NOMINAL + monitoring, no false alarm)")
+    print(f"    {PASS if ok_b else FAIL}: light-rain tidal lock stays NOMINAL (no false WARNING)")
+
+    ok = ok_a and ok_b
+    print(f"  {PASS if ok else FAIL}: tidal coincidence handled correctly "
+          f"(burst escalates, tide is monitoring, no false alarm)")
     return ok
 
 
