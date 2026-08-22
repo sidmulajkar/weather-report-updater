@@ -77,9 +77,17 @@ def main():
     # the bottleneck, so concurrency collapses wall-time to ~max single-city.
     def process_city(loc):
         name = loc["name"]
+        # SAFE DEFAULTS: every variable the result dict references must be
+        # defined on ALL branches (primary / MET-Norway fallback / both-failed).
+        # Without this, a city that takes the fallback path raises
+        # UnboundLocalError on the first var it didn't assign (seen on CI:
+        # w850dir). Initialize once, here.
+        acc = prob = w10 = wdir = w850d = cape = gust = 0.0
+        w850 = w850dir = None
+        hourly_precip = []
+        src = "open-meteo"
         # --- PRIMARY fetch (Open-Meteo fusion, models fetched in parallel) ---
         pf = om.fetch_location(loc, models, forecast_days=cfg.get("forecast_days", 2))
-        src = "open-meteo"
         if not pf.models:
             # --- FALLBACK (MET Norway) ---
             fb = fetch_metno.fetch(loc["lat"], loc["lon"], hours=window)
