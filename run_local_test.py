@@ -9,6 +9,7 @@ import delivery.telegram as tg
 
 cap = {}
 sent = []
+sent_anim = []
 
 def fake_msg(chat_id, text, dry_run=False, pace=1.0, parse_mode=None):
     cap['s'] = text
@@ -18,13 +19,19 @@ def fake_ph(chat_id, path, caption="", dry_run=False):
     sent.append((os.path.basename(path), caption))
     return {"ok": True}
 
+def fake_anim(chat_id, path, caption="", dry_run=False, pace=1.0, supports_streaming=False):
+    sent_anim.append((os.path.basename(path), caption, supports_streaming))
+    return {"ok": True}
+
 tg.send_message = fake_msg
 tg.send_photo = fake_ph
+tg.send_animation = fake_anim
 
 t0 = time.time()
 rr.main()
-print(f"\nTOTAL_RUNTIME={time.time()-t0:.1f}s  TEXT_LEN={len(cap.get('s',''))}  SENT={len(sent)}")
-print("MAPS:", [f for f, _ in sent])
+all_media = sent + [(f, c) for f, c, _ in sent_anim]
+print(f"\nTOTAL_RUNTIME={time.time()-t0:.1f}s  TEXT_LEN={len(cap.get('s',''))}  SENT={len(all_media)}")
+print("MAPS:", [f for f, _ in all_media])
 print("=" * 60)
 print(cap.get('s', ''))
 
