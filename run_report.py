@@ -785,7 +785,7 @@ def main():
 
 
 def _verify_outputs(OUT, severe_mode, DRY):
-    """Fail loudly in CI if expected deliverables are missing or blank."""
+    """Fail loudly in CI if expected deliverables are missing, blank, or all-white."""
     required = [
         os.path.join(OUT, "report.md"),
         os.path.join(OUT, "state_synoptic_brief.png"),
@@ -797,7 +797,7 @@ def _verify_outputs(OUT, severe_mode, DRY):
     elif os.path.exists(mmr_gif):
         required.append(mmr_gif)
     else:
-        required.append(mmr_mp4)  # expected path for failure message
+        required.append(mmr_mp4)
 
     if severe_mode:
         required += [
@@ -816,11 +816,29 @@ def _verify_outputs(OUT, severe_mode, DRY):
             sys.exit(2)
         return
 
-    blank = [p for p in required if os.path.getsize(p) < 1024]
+    blank = []
+    for p in required:
+        size = os.path.getsize(p)
+        if size < 1024:
+            blank.append(p)
+            continue
+        if p.endswith(('.png', '.jpg', '.jpeg')):
+            try:
+                from PIL import Image
+                img = Image.open(p).convert('RGB')
+                arr = np.asarray(img)
+                if arr.size == 0 or arr.mean(axis=(0, 1)).tolist() == [255.0, 255.0, 255.0]:
+                    blank.append(p)
+                elif (arr < 250).sum() < 1000:
+                    blank.append(p)
+            except Exception as e:
+                print(f"[!] could not inspect {p}: {e}")
+                blank.append(p)
+
     if blank:
-        print("[!] suspiciously small deliverables:")
+        print("[!] blank/white deliverables:")
         for p in blank:
-            print(f"    - {p} ({os.path.getsize(p)} bytes)")
+            print(f"    - {p}")
         if not DRY:
             sys.exit(3)
 

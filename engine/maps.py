@@ -877,7 +877,22 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
     # panel cycles through radar frames for live observed reflectivity.
     p_mmr = by_base.get("mmr_zoom.png")
     if not p_mmr or not os.path.exists(p_mmr):
-        print("[!] mmr_zoom.png missing; skipping animated composite")
+        print("[!] mmr_zoom.png missing; creating placeholder MMR asset brief")
+        # Preserve the 2-image contract: still emit a second image.
+        fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
+        axes2[0].text(0.5, 0.5, "DATA UNAVAILABLE\nMMR zoom source data missing",
+                      ha="center", va="center", fontsize=11, color="#333333")
+        axes2[0].set_title("Mumbai Metro Region 0.1deg Zoom (+ outfalls)\n(unavailable)", fontsize=10)
+        axes2[0].axis("off")
+        axes2[1].text(0.5, 0.5, "DATA UNAVAILABLE\nRadar source data missing",
+                      ha="center", va="center", fontsize=11, color="#333333")
+        axes2[1].set_title("IMD Doppler Radar Mosaic (observed reflectivity)\n(unavailable)", fontsize=10)
+        axes2[1].axis("off")
+        fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
+        fig2.tight_layout(pad=3.0)
+        p2 = os.path.join(out_dir, "mmr_asset_brief.gif")
+        fig2.savefig(p2, bbox_inches="tight"); plt.close(fig2)
+        outs.append(p2)
         return outs
 
     _frames_dir = os.path.join(out_dir, "_anim_tmp")
