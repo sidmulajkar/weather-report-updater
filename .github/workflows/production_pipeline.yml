@@ -23,13 +23,10 @@ jobs:
   execute_forecasting_matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # App code lives in the weather-updater/ subdir (repo root = weather-report-updater/).
-    # Run all `run:` steps there so `python run_report.py` / `python engine/...`
- # resolve correctly. (actions/cache `path:` values are relative to repo root and
-    # already carry the weather-updater/ prefix, so they are unaffected.)
+    # App code lives at repo root now.
     defaults:
       run:
-        working-directory: weather-updater
+        working-directory: .
     steps:
       - name: Codebase Ingestion
         uses: actions/checkout@v4
@@ -40,7 +37,7 @@ jobs:
           python-version: "3.11"
           cache: pip
           # requirements.txt lives in the app subdir (weather-updater/).
-          cache-dependency-path: weather-updater/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Resolve System Dependencies
         run: |
@@ -61,7 +58,7 @@ jobs:
         # recent prior run's cache (per-run keys would never restore).
         uses: actions/cache@v4
         with:
-          path: weather-updater/engine/archive.db
+          path: engine/archive.db
           key: weather-db-${{ github.ref_name }}
           restore-keys: |
             weather-db-
@@ -74,7 +71,7 @@ jobs:
         # restore-keys falls back to the most recent prior run's cache.
         uses: actions/cache@v4
         with:
-          path: weather-updater/cache
+          path: cache
           key: weather-cache-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             weather-cache-${{ github.ref_name }}-
