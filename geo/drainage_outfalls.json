@@ -1,0 +1,12 @@
+{
+  "_note": "Static drainage outfall / asset overlay coordinates for Mumbai Metro Region depth maps. CLIENT-PRIVATE: replace the reference entries with your contracted asset coordinates. Coordinates below are REAL public reference outfalls (Mumbai) used only to validate the overlay rendering; they are NOT a forecast and carry no rainfall value. Source: MCGM drainage network (public reference). Do NOT treat these as measured flood points.",
+  "outfalls": [
+    {"name": "Love Grove (Worli)", "lat": 19.012, "lon": 72.824, "type": "outfall", "source": "MCGM public reference"},
+    {"name": "Cleave Land (Byculla)", "lat": 19.076, "lon": 72.836, "type": "outfall", "source": "MCGM public reference"},
+    {"name": "Haji Ali (Worli)", "lat": 18.997, "lon": 72.836, "type": "outfall", "source": "MCGM public reference"},
+    {"name": "Santacruz (S.V. Road)", "lat": 19.089, "lon": 72.842, "type": "outfall", "source": "MCGM public reference"}
+  ],
+  "assets_placeholder": [
+    {"name": "<<CLIENT_ASSET_1>>", "lat": null, "lon": null, "type": "fixed_asset", "source": "client-private"}
+  ]
+}

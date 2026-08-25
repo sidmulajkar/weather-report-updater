@@ -1,71 +1,17 @@
-# ── Python / build artifacts ───────────────────────────────────────────────
+# OSM tile cache
+.osm_tiles/
+
+# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# ── Local virtualenv (created per-machine; never commit) ───────────────────
+*.pyc
 .venv/
-venv/
-venv1/
-weather-updater/venv1/
-
-# ── Local runtime databases & logs ─────────────────────────────────────────
-*.db
-*.sqlite
-*.sqlite3
-*.log
-engine/archive.db
-weather-updater/engine/archive.db
-
-# ── Generated output (client-facing tactical intel; delivered via Telegram,
-#    NOT committed to the public repo) ──────────────────────────────────────
-output/
-weather-updater/output/
-weather-updater/output/report.md
-weather-updater/output/*.png
-weather-updater/output/*.pdf
-
-# ── Secrets / local env (NEVER commit tokens; use GitHub encrypted secrets) ─
+venv*/
 .env
-*.env
-*.token
-*.key
-secrets.json
 
-# ── Local research / evidence packs (working notes, not deployable code) ────
-.research/
-.research-*/
-.research-cred/
-.research-cyclone/
-.research-deep/
-.research-github/
-.research-mumbai/
-.research-narrative/
-fetch_cache.db
+# Outputs
+output/
+*.log
 
-# ── Loose research artifacts at repo root (not part of the engine) ──────────
-*.research.txt
-report-*.txt
-WEATHER-UPDATER-RESEARCH-AND-PLAN.md
-BUILD-PLAN*.md
-DEPTH-UPGRADE-PLAN.md
-SEVERE-SYSTEMS-PLAN.md
-
-# ── Attached reference screenshots (not source) ────────────────────────────
-*.jpeg
-*.jpg
-HOm3TcpaIAA78-U.jpeg
-HP58RN7bgAAb3_O.jpeg
-
-# ── OS / editor cruft ──────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-*.swp
-*~
-
-# ── IDE / editor config (optional) ─────────────────────────────────────────
+# IDE
 .vscode/
 .idea/

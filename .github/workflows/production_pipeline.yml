@@ -22,7 +22,14 @@ on:
 jobs:
   execute_forecasting_matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # App code lives in the weather-updater/ subdir (repo root = weather-report-updater/).
+    # Run all `run:` steps there so `python run_report.py` / `python engine/...`
+ # resolve correctly. (actions/cache `path:` values are relative to repo root and
+    # already carry the weather-updater/ prefix, so they are unaffected.)
+    defaults:
+      run:
+        working-directory: weather-updater
     steps:
       - name: Codebase Ingestion
         uses: actions/checkout@v4
@@ -32,8 +39,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          # Repo root already holds the app; requirements.txt is at the root.
-          cache-dependency-path: requirements.txt
+          # requirements.txt lives in the app subdir (weather-updater/).
+          cache-dependency-path: weather-updater/requirements.txt
 
       - name: Resolve System Dependencies
         run: |
@@ -45,6 +52,33 @@ jobs:
         # (Not `unittest discover` — that file is a script with a main(), not TestCases,
         #  so discover would report "0 tests" and falsely pass.)
         run: python engine/sim_scenarios.py
+
+      - name: Retain System Validation Database
+        # Persist engine/archive.db across cron runs so forecast-vs-observed
+        # verification history (skill / bias calibration) is NOT lost on every
+        # job restart. The DB is gitignored (*.db) so it never enters version
+        # control. Key is branch-stable; restore-keys falls back to the most
+        # recent prior run's cache (per-run keys would never restore).
+        uses: actions/cache@v4
+        with:
+          path: weather-updater/engine/archive.db
+          key: weather-db-${{ github.ref_name }}
+          restore-keys: |
+            weather-db-
+
+      - name: Retain No-Key Forecast Cache
+        # Persist weather-updater/cache/ (forecast_cache.json) across cron runs
+        # so the 6h no-key grid+cities cache survives job restarts. Protects
+        # runs 2-4 within a 6h window from re-hitting Open-Meteo's anonymous
+        # daily cap (esp. on a shared Azure egress IP). Key is branch-stable;
+        # restore-keys falls back to the most recent prior run's cache.
+        uses: actions/cache@v4
+        with:
+          path: weather-updater/cache
+          key: weather-cache-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            weather-cache-${{ github.ref_name }}-
+            weather-cache-
 
       - name: Run Core Weather Risk Analysis Engine
         env:

@@ -38,6 +38,11 @@ except Exception:  # allow standalone import / tests
     def _rate_limit():
         pass
 
+# Module-level daily-ban flag. Set by _fetch_series when Open-Meteo returns the
+# anonymous 'Daily API request limit exceeded' body. Lets the basin scans
+# short-circuit instead of burning the full timeout on every remaining point.
+_DAILY_BAN = False
+
 RSMC_GENESIS = "https://rsmcnewdelhi.imd.gov.in/genesis-forecast.php"
 HEADERS = {"User-Agent": "Mozilla/5.0 (weather-updater research; +local)"}
 
@@ -97,7 +102,13 @@ def fetch_imd_genesis() -> dict:
 
 
 def _fetch_series(lat, lon, days=10):
-    """Open-Meteo 10-day MSLP + 850hPa wind + cape for one point."""
+    """Open-Meteo 10-day MSLP + 850hPa wind + cape for one point.
+
+    Hardened for the anonymous daily-ban: detects the 'Daily API request
+    limit exceeded' body and aborts immediately (no 15s socket wait), and uses
+    a short timeout so a dead/slow connection fails fast instead of hanging
+    the whole run for minutes. On any failure returns None -> the caller
+    degrades gracefully (MSLP field 'unavailable', no model alerts)."""
     url = "https://api.open-meteo.com/v1/forecast"
     p = {"latitude": lat, "longitude": lon,
          "hourly": ["pressure_msl", "wind_speed_850hPa", "wind_direction_850hPa",
@@ -105,8 +116,18 @@ def _fetch_series(lat, lon, days=10):
          "models": "ecmwf_ifs", "forecast_days": days, "timezone": "Asia/Kolkata"}
     try:
         _rate_limit()  # share the global polite gate with city forecasts
-        r = requests.get(url, params=p, timeout=15)
+        r = requests.get(url, params=p, timeout=8)
+        # Fast-fail on the anonymous daily cap: Open-Meteo returns this as a
+        # 400/429 JSON body (not a socket error), so without this check the
+        # caller would treat it as "no data" only AFTER the full timeout.
         if r.status_code != 200:
+            try:
+                if "Daily API request limit exceeded" in r.text:
+                    # signal upstream that the whole basin scan is futile this
+                    # cycle; a module-level flag lets callers short-circuit.
+                    severe_systems._DAILY_BAN = True
+            except Exception:
+                pass
             return None
         h = r.json().get("hourly", {})
         if not h.get("pressure_msl"):
@@ -134,6 +155,8 @@ def model_genesis_scan(forecast_days: int = 10) -> list[dict]:
     Returns list of candidate alerts with ETA (days) + basin.
     """
     alerts = []
+    if _DAILY_BAN:  # Open-Meteo banned this IP this cycle -> don't burn timeouts
+        return alerts
     for basin, grid in BASIN_GRID.items():
         series = {}
         # CONCURRENT: 14 basin points fetched in parallel (shared rate limiter
@@ -205,19 +228,23 @@ def build_outlook() -> dict:
     """Combine A (official) + B (model) into one outlook dict for the report."""
     imd = fetch_imd_genesis()
     model_alerts = model_genesis_scan()
-    # gather model grid series once for the low-pressure check
+    # gather model grid series once for the low-pressure check.
+    # If Open-Meteo banned this IP this cycle, skip the basin grid scan
+    # entirely (it would only burn the per-call timeouts and still return
+    # nothing) and report no model-derived low-pressure signal.
     grid_series = {}
-    for basin, grid in BASIN_GRID.items():
-        gs = {}
-        # CONCURRENT (same fix as model_genesis_scan): was serial -> 7-min hang.
-        with ThreadPoolExecutor(max_workers=min(len(grid), 7)) as ex:
-            fut_map = {ex.submit(_fetch_series, la, lo, 10): (la, lo) for (la, lo) in grid}
-            for fut in fut_map:
-                la, lo = fut_map[fut]
-                s = fut.result()
-                if s:
-                    gs[(la, lo)] = s
-        grid_series[basin] = gs
+    if not _DAILY_BAN:
+        for basin, grid in BASIN_GRID.items():
+            gs = {}
+            # CONCURRENT (same fix as model_genesis_scan): was serial -> 7-min hang.
+            with ThreadPoolExecutor(max_workers=min(len(grid), 7)) as ex:
+                fut_map = {ex.submit(_fetch_series, la, lo, 10): (la, lo) for (la, lo) in grid}
+                for fut in fut_map:
+                    la, lo = fut_map[fut]
+                    s = fut.result()
+                    if s:
+                        gs[(la, lo)] = s
+            grid_series[basin] = gs
     lp = low_pressure_belt(grid_series)
 
     all_alerts = list(model_alerts) + lp

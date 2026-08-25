@@ -70,6 +70,15 @@ def fetch_point(lat: float, lon: float, model: str, forecast_days: int = 2,
     except requests.RequestException as e:
         return {"_error": str(e)}
     if r.status_code != 200:
+        # FAST-FAIL on Open-Meteo's hard daily cap — retrying is pointless and
+        # just hangs the run. Return a sentinel so callers degrade fast.
+        txt = ""
+        try:
+            txt = r.text or ""
+        except Exception:
+            pass
+        if "Daily API request limit exceeded" in txt:
+            return {"_error": "daily-limit", "_daily_ban": True}
         return {"_error": f"HTTP {r.status_code}: {r.text[:160]}"}
     j = r.json()
     if "hourly" not in j:
@@ -150,12 +159,22 @@ def model_24h_precip(pf: PointForecast, n: int = 24) -> dict:
     return out
 
 
-def fusion_stats(values: dict) -> dict:
-    """Given model->value, compute mean, min, max, spread, agreement flag."""
+def fusion_stats(values: dict, weights: dict | None = None) -> dict:
+    """Given model->value, compute mean, min, max, spread, agreement flag.
+
+    If `weights` is provided, compute a weighted mean instead of simple mean.
+    Missing models are ignored and weights are renormalized over the present set.
+    """
     if not values:
         return {"mean": 0.0, "min": 0.0, "max": 0.0, "spread": 0.0, "n": 0}
     vals = list(values.values())
     mean = sum(vals) / len(vals)
+    if weights:
+        present = {m: v for m, v in values.items() if m in weights}
+        if present:
+            wsum = sum(weights[m] for m in present)
+            if wsum > 0:
+                mean = sum(present[m] * weights[m] for m in present) / wsum
     return {
         "mean": round(mean, 2),
         "min": round(min(vals), 2),
@@ -163,6 +182,18 @@ def fusion_stats(values: dict) -> dict:
         "spread": round(max(vals) - min(vals), 2),
         "n": len(vals),
     }
+
+
+# Operational ensemble weights for the Maharashtra pipeline.
+# ECMWF: boundary-layer moisture + rainfall core.
+# ICON: Open-Meteo's own blend / regional tuning.
+# GFS: synoptic wind + large-scale trend.
+# Weights sum to 1.0; missing models are renormalized away automatically.
+ENSEMBLE_WEIGHTS = {
+    "ecmwf_ifs": 0.50,
+    "icon_global": 0.30,
+    "gfs_seamless": 0.20,
+}
 
 
 def mean_over_window(hourly: dict, var: str, n: int, start_idx: int = 0) -> float:

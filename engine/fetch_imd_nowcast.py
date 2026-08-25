@@ -17,6 +17,7 @@ gracefully say "IMD nowcast unavailable" instead of faking a colour.
 """
 from __future__ import annotations
 import requests
+from engine import sanity
 
 WFS_URL = "https://reactjs.imd.gov.in/geoserver/imd/wfs"
 LAYER = "imd:NowcastWarningDistrict"
@@ -42,17 +43,19 @@ CAT_TEXT = {
 }
 
 
-def fetch_nowcast(state: str = "MAHARASHTRA", timeout: int = 30) -> dict:
-    """Return {status, date, by_district:{DISTRICT: record}} for the given state.
+def fetch_nowcast(state: str = "MAHARASHTRA", timeout: int = 30, ttl_minutes: int = 180) -> dict:
+    """Return {status, date, by_district:{DISTRICT: record}, stale_summary} for the given state.
 
     District keys are upper-cased for matching. On failure status='unavailable'.
+    Applies TTL gate: records older than `ttl_minutes` are marked stale.
     """
-    out = {"status": "unavailable", "date": None, "by_district": {}, "reason": ""}
+    out = {"status": "unavailable", "date": None, "by_district": {}, "reason": "",
+           "stale_summary": {"ok": 0, "stale": 0, "reasons": []}}
     try:
         r = requests.get(WFS_URL, params={
             "service": "WFS", "version": "1.1.0", "request": "GetFeature",
-            "typename": LAYER, "srsname": "EPSG:4326",
-            "outputFormat": "application/json"}, headers=HEADERS, timeout=timeout)
+            "typename": LAYER, "srsname": "EPSG:4326", "outputFormat": "application/json"
+        }, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
         j = r.json()
     except requests.RequestException as e:
@@ -81,12 +84,28 @@ def fetch_nowcast(state: str = "MAHARASHTRA", timeout: int = 30) -> dict:
             "date": p.get("Date"), "update_time": p.get("update_time"),
             "categories": cats,
             "cat_text": [CAT_TEXT.get(int(c[3:]), c) for c in cats if c[3:].isdigit()],
+            "validity_window": sanity.nowcast_validity_text({
+                "message": p.get("message"),
+                "toi": p.get("toi"), "vupto": p.get("vupto")
+            }),
         }
+        ttl = sanity.nowcast_ttl_status(rec, ttl_minutes=ttl_minutes)
+        rec["ttl"] = ttl
         byd[d] = rec
+
     out["status"] = "ok"
     out["by_district"] = byd
     out["date"] = j.get("features", [{}])[0].get("properties", {}).get("Date") if byd else None
     out["date"] = max((r2.get("date") for r2 in byd.values() if r2.get("date")), default=None)
+    # stale summary
+    stale_summary = {"ok": 0, "stale": 0, "reasons": []}
+    for d, r in byd.items():
+        if r["ttl"]["fresh"]:
+            stale_summary["ok"] += 1
+        else:
+            stale_summary["stale"] += 1
+            stale_summary["reasons"].append(f"{d}: {r['ttl']['reason']}")
+    out["stale_summary"] = stale_summary
     return out
 
 
@@ -109,10 +128,13 @@ def nowcast_for_district(nc: dict, district: str) -> dict:
 if __name__ == "__main__":
     nc = fetch_nowcast()
     print("nowcast status:", nc["status"], "| date:", nc["date"], "| reason:", nc.get("reason"))
+    print("stale summary:", nc["stale_summary"])
     print("Maharashtra districts:", len(nc["by_district"]))
     for d in ["MUMBAI SUBURBAN", "PUNE", "NAGPUR", "RATNAGIRI", "KOLHAPUR", "RAIGAD"]:
         r = nowcast_for_district(nc, d)
         if r.get("found"):
-            print(f"  {d:16s} -> {r['color_label']:7s} | cats={r['cat_text']} | msg={r['message'][:60]}")
+            vw = r.get("validity_window") or "no validity window"
+            print(f"  {d:16s} -> {r['color_label']:7s} | cats={r['cat_text']} | {vw} | msg={r['message'][:60]}")
         else:
             print(f"  {d:16s} -> {r['status']}: {r.get('reason')}")
+

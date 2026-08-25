@@ -26,12 +26,14 @@ LEESIDE = ["PUNE", "NASHIK", "AURANGABAD", "SOLAPUR", "KOLHAPUR", "SATARA", "SAN
 URBAN = ["MUMBAI", "THANE", "NAVI MUMBAI"]
 
 # orographic rain multiplier applied to forecast accum when wind is onshore W/SW
-OROG_RAIN_MULT = 1.25
+OROG_RAIN_MULT = 1.3
 # gust amplification factors
 GUST_URBAN = 1.4
 GUST_GHATS = 1.2
 # wind direction sector considered "onshore forcing" (degrees, W/SW)
 ONSHORE_SECTOR = (200, 340)
+# speed floor for orographic activation (km/h -> ~15 kt * 1.852)
+OROG_MIN_WIND_KMH = 27.8
 
 
 def zone_of(district: str) -> str:
@@ -53,7 +55,7 @@ def is_onshore(wind_dir: Optional[float]) -> bool:
 
 
 def adjust(district: str, forecast_mm: float, wind_dir: Optional[float],
-           gust_kmh: float) -> dict:
+           gust_kmh: float, wind_850_kmh: Optional[float] = None) -> dict:
     """Return modeled adjustments for a district.
 
     - rain_factor: multiply forecast accum by this (orographic)
@@ -63,7 +65,9 @@ def adjust(district: str, forecast_mm: float, wind_dir: Optional[float],
     onshore = is_onshore(wind_dir)
     rain_factor = 1.0
     if zone in ("GHATS_WINWARD", "URBAN_GHATS") and onshore:
-        rain_factor = OROG_RAIN_MULT
+        speed = wind_850_kmh if wind_850_kmh is not None else gust_kmh
+        if speed >= OROG_MIN_WIND_KMH:
+            rain_factor = OROG_RAIN_MULT
     gust_factor = 1.0
     if zone == "URBAN":
         gust_factor = GUST_URBAN

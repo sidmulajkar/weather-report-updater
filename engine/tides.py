@@ -70,22 +70,82 @@ def load_tide_table(path: str) -> list[dict]:
                 continue
             if not iso:
                 continue
+            # Normalize to a NAIVE IST wall-clock datetime. The CSV's iso_ist
+            # carries a +05:30 offset; we strip it so all downstream time math
+            # (rain-peak vs tide) stays tz-consistent. We work in IST everywhere.
+            try:
+                _dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                iso = _dt.replace(tzinfo=None).isoformat()
+            except Exception:
+                pass
             rows.append({"iso": iso, "tide_m": h,
                          "source": (r.get("source") or "unknown").strip()})
     return rows
 
 
+def _naive(dt):
+    """Strip tzinfo so aware (IST) and naive datetimes can be compared."""
+    return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
+
+
 def high_tides_near(table: list[dict], dt: datetime, window_h: float) -> list[dict]:
     """Return high-tide entries within +/- window_h of dt that exceed lock level."""
+    ref = _naive(dt)
     out = []
     for e in table:
         try:
-            t = datetime.fromisoformat(e["iso"])
+            t = _naive(datetime.fromisoformat(e["iso"]))
         except Exception:
             continue
-        if abs((t - dt).total_seconds()) / 3600.0 <= window_h and e["tide_m"] >= TIDE_LOCK_M:
+        if abs((t - ref).total_seconds()) / 3600.0 <= window_h and e["tide_m"] >= TIDE_LOCK_M:
             out.append(e)
     return out
+
+
+def lock_window(table: list[dict], rain_peak_dt: datetime,
+                window_h: float = 12.0) -> dict:
+    """Return the drainage-lock WINDOW (onset/clear IST) for a rain-peak time.
+
+    Mechanism (verified): Mumbai's 40+ stormwater outfalls drain by gravity to
+    the Arabian Sea; at HIGH TIDE the sea rises above the outfall mouths and
+    gates close, halting drainage. The lock is not an instantaneous on/off — it
+    is the contiguous span around a high tide during which the (sampled) tide
+    curve stays at/above TIDE_LOCK_M. We estimate that span from the high-tide
+    table entries (their timestamps + heights), expanding symmetrically by
+    OVERLAP_WINDOW_H as a conservative gate-open/close margin.
+
+    OUTPUT (all honest, no invented values):
+      - active: bool  (any locking high tide within +/- window_h of peak)
+      - start_ist / end_ist: "HH:MM IST" strings (None if inactive)
+      - max_tide_m, tide_iso, source  (provenance: REAL vs SAMPLE)
+      - sample_data: bool  (True => tide row is placeholder; label output)
+    If no real high tide is found, returns active=False with a clear note.
+    """
+    highs = [e for e in table
+             if abs((_naive(datetime.fromisoformat(e["iso"])) - _naive(rain_peak_dt)).total_seconds()) / 3600.0
+                <= window_h and e["tide_m"] >= TIDE_LOCK_M] if table else []
+    if not highs:
+        return {"active": False, "start_ist": None, "end_ist": None,
+                "max_tide_m": 0.0, "tide_iso": None, "source": None,
+                "sample_data": False, "note": "no locking high tide near peak"}
+    peak = max(highs, key=lambda e: e["tide_m"])
+    peak_t = datetime.fromisoformat(peak["iso"])
+    start = peak_t - timedelta(hours=OVERLAP_WINDOW_H)
+    end = peak_t + timedelta(hours=OVERLAP_WINDOW_H)
+    def fmt(dt_utc):
+        # tide ISO in CSV is stored as IST already (iso_ist); format as-is.
+        return dt_utc.strftime("%H:%M IST")
+    return {
+        "active": True,
+        "start_ist": fmt(start),
+        "end_ist": fmt(end),
+        "max_tide_m": peak["tide_m"],
+        "tide_iso": peak["iso"],
+        "source": peak.get("source"),
+        "sample_data": (peak.get("source") or "").upper().startswith("SAMPLE"),
+        "note": None,
+    }
+
 
 
 def tidal_factor(table: list[dict], rain_peak_dt: datetime,

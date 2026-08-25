@@ -14,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 
 INDIA = timezone(timedelta(hours=5, minutes=30))  # Asia/Kolkata, stdlib only
 
-LEVEL_EMOJI = {"CRITICAL": "🔴", "WARNING": "🟠", "ADVISORY": "🟡", "NOMINAL": "🟢"}
+# IMD-register style: no emoji in the analyst bulletin (clean, official look).
+# Levels render as plain text (CRITICAL/WARNING/ADVISORY/NOMINAL).
+LEVEL_EMOJI = {"CRITICAL": "", "WARNING": "", "ADVISORY": "", "NOMINAL": ""}
 LEVEL_RANK = {"NOMINAL": 0, "ADVISORY": 1, "WARNING": 2, "CRITICAL": 3}
 LEVEL_ACTION = {
     "CRITICAL": "Immediate halt of outdoor/height work; evacuate low-lying sites; reroute logistics.",
@@ -30,6 +32,8 @@ def compass(deg):
         return DIR_NAMES[int((float(deg) % 360) / 22.5)]
     except (TypeError, ValueError):
         return "?"
+
+import engine.imd_terms as imd_terms
 def onshore_note(deg):
     try:
         d = float(deg) % 360
@@ -51,25 +55,28 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
 
     lines = []
     # ============ 1. EXECUTIVE ALERT SUMMARY ============
-    lines.append(f"# 🌦️ {region} Operational Rainfall Risk — next 24h ({date_str})")
+    lines.append(f"# {region} Operational Rainfall Risk — next 24h ({date_str})")
     lines.append("")
     lines.append(f"**Run:** {run_date or date_str} (IST)  |  **Sources:** Open-Meteo fusion "
                  f"(ECMWF/ICON/GFS) + IMD observed & nowcast cross-check")
     lines.append("")
-    lines.append("## ▣ EXECUTIVE ALERT SUMMARY")
+    lines.append("## EXECUTIVE ALERT SUMMARY")
     lines.append("")
     active = [r for r in ranked if r["risk"].level in ("CRITICAL", "WARNING", "ADVISORY")]
     if active:
         # systemic metro warning if >=2 adjacent assets at WARNING+ (proximity cluster)
         clustered = [r["name"] for r in active if r.get("proximity", {}).get("flagged")]
+        # Lead with IMD's authoritative colour (not our operational override level).
+        def _imd_c(r):
+            return (r.get("imd") or {}).get("colour") or (r["risk"].imd_colour) or "n/a"
         lines.append(f"**Active alerts:** {len(active)} asset(s) — "
-                     + ", ".join(f"{LEVEL_EMOJI[r['risk'].level]} {r['name']} "
-                                 f"({r['risk'].level})" for r in active[:8]))
+                     + ", ".join(f"{r['name']} (IMD {_imd_c(r)})"
+                                 for r in active[:8]))
         top = active[0]
-        lines.append(f"**Highest priority:** {top['name']} — {LEVEL_EMOJI[top['risk'].level]} "
-                     f"{top['risk'].level}")
+        lines.append(f"**Highest priority:** {top['name']} — IMD {_imd_c(top)} "
+                     f"(operational: {top['risk'].level})")
         if len(clustered) >= 2:
-            lines.append(f"⚠️ **SYSTEMIC METRO WARNING:** compounding risk across "
+            lines.append(f"**SYSTEMIC METRO WARNING:** compounding risk across "
                          f"{', '.join(clustered)} — treat as a connected transit/logistics "
                          f"hazard, not isolated sites.")
         # immediate actions (top 3)
@@ -95,11 +102,11 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
         if drivers:
             lines.append("**Atmospheric drivers:** " + "; ".join(drivers))
     else:
-        lines.append("✅ No asset currently crosses the advisory threshold. Routine monitoring.")
+        lines.append("No asset currently crosses the advisory threshold. Routine monitoring.")
     lines.append("")
 
     # ============ 2. MULTI-VARIABLE PARAMETER MATRIX ============
-    lines.append("## ▤ MULTI-VARIABLE PARAMETER MATRIX")
+    lines.append("## MULTI-VARIABLE PARAMETER MATRIX")
     lines.append("")
     lines.append("| Asset | Level | 24h (raw→corr) | Peak burst | Wind hazard | Tidal lock | "
                  "Proximity | Antecedent 7d | IMD now |")
@@ -134,7 +141,7 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
     lines.append("")
 
     # ============ 3. VALIDATION CONTEXT (transparency before metrics) ============
-    lines.append("## ⊘ VALIDATION CONTEXT")
+    lines.append("## VALIDATION CONTEXT")
     lines.append("")
     deficits = []
     if observed_status != "ok":
@@ -163,7 +170,8 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
     lines.append("")
     for r in active[:5]:
         rk = r["risk"]
-        lines.append(f"{LEVEL_EMOJI[rk.level]} **{r['name']}** ({rk.level}): "
+        imd_c = rk.imd_colour or "unavailable"
+        lines.append(f"**{r['name']}** (IMD {imd_c}, operational: {rk.level}): "
                      f"{LEVEL_ACTION[rk.level]}")
         obs = r.get("observed", {})
         obs_date = obs.get("source_date")
@@ -175,7 +183,7 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
         imd_lvl = {"Green": "NOMINAL", "Yellow": "ADVISORY",
                     "Orange": "WARNING", "Red": "CRITICAL"}.get(imd_c, "NOMINAL")
         if LEVEL_RANK[rk.level] > LEVEL_RANK.get(imd_lvl, 0):
-            lines.append(f"   ⚠️ OPERATIONAL OVERRIDE: IMD data = {imd_c} "
+            lines.append(f"   OPERATIONAL OVERRIDE: IMD data = {imd_c} "
                          f"({imd_lvl}), but operational risk = {rk.level} due to "
                          f"local impact dynamics (see escalations).")
         if rk.escalation_reasons:
@@ -185,7 +193,7 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
     lines.append("")
 
     # ============ 5. GROUND-TRUTH VERIFICATION LOG ============
-    lines.append("## ⊟ GROUND-TRUTH VERIFICATION (previous-day observed)")
+    lines.append("## GROUND-TRUTH VERIFICATION (previous-day observed)")
     lines.append("")
     for r in ranked:
         obs = r.get("observed", {})
@@ -202,11 +210,11 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
     lines.append("")
 
     # ============ 6. SEVERE OUTLOOK + FOOTER ============
-    lines.append("## ☁ SEVERE-SYSTEM OUTLOOK (3–7 day lead)")
+    lines.append("## SEVERE-SYSTEM OUTLOOK (3–7 day lead)")
     if severe:
         off = severe.get("official", {})
         if off.get("watch"):
-            lines.append("🚨 **IMD PRE-CYCLONE WATCH active** — cyclonic disturbance developing "
+            lines.append("**IMD PRE-CYCLONE WATCH active** — cyclonic disturbance developing "
                          "(issued ~72h ahead by RSMC New Delhi).")
         if off.get("outlook_url"):
             lines.append(f"IMD Tropical Weather Outlook: {off['outlook_url']}")
@@ -227,7 +235,7 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
 
     # skill (honest calibration)
     if skill and skill.get("n_pairs"):
-        cal = "✅ calibrated" if skill.get("calibrated") else "⚠️ indicative only"
+        cal = "calibrated" if skill.get("calibrated") else "indicative only"
         lines.append(f"**Forecast skill** vs IMD observed (event ≥ {skill['threshold_mm']} mm/24h, "
                      f"n={skill['n_pairs']}, {cal}): POD={skill['POD']}, FAR={skill['FAR']}, "
                      f"CSI={skill['CSI']}, ETS={skill['ETS']}, BSS={skill['BSS']}.")
@@ -255,9 +263,35 @@ def _lvl(level: str) -> int:
     return {"CRITICAL": 3, "WARNING": 2, "ADVISORY": 1, "NOMINAL": 0}.get(level, 0)
 
 
+def _esc(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _html_summary(summary: str) -> str:
+    """Minimal Telegram HTML post-processing: preserve structure, add safe bolding."""
+    if not summary:
+        return summary
+    lines = []
+    for line in summary.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("=" * 10) or stripped.startswith("-" * 10):
+            lines.append(f"<pre>{_esc(stripped)}</pre>")
+        elif stripped.startswith("REGION") or stripped.startswith("ISSUED") or stripped.startswith("SOURCES") or stripped.startswith("SYSTEM STATUS"):
+            lines.append(f"<b>{_esc(stripped)}</b>")
+        elif stripped in {"DISTRICT WARNINGS (24h):", "COASTAL ADVISORY (YELLOW):", "SYNOPTIC VALIDATION", "SYSTEMIC INSIGHT (model-derived, no invented physics)", "DIRECTIVE: Cross-verify with official IMD (mausam.imd.gov.in). Consolidated risk maps attached (state synoptic + MMR/asset). Unofficial analyst product."}:
+            lines.append(f"<b>{_esc(stripped)}</b>")
+        elif stripped.startswith("- ") or stripped.startswith("• "):
+            lines.append(_esc(line))
+        elif stripped.startswith("  ") and stripped.upper() == stripped:
+            lines.append(f"<b>{_esc(stripped)}</b>")
+        else:
+            lines.append(_esc(line))
+    return "\n".join(lines)
+
+
 def summarize(results: list[dict], region: str, run_date: str, severe: dict,
-              radar_status: dict = None) -> str:
-    """Smart, adaptive ONE-PARAGRAPH-ish Telegram briefing (plain text, <4096 chars).
+              radar_status: dict = None, analysis: dict = None) -> str:
+    """Smart, adaptive ONE-PARAGRAPH-ish Telegram briefing (HTML-safe, <4096 chars).
 
     Tier routing off the ALREADY-COMPUTED risk objects (never re-derives severity,
     never invents tide heights, never uses a 5th "WATCH" level — IMD 4-level schema):
@@ -266,33 +300,67 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
               explain the lock qualitatively, "no downtime".
       Tier C (all NOMINAL, no tidal_watch): ultra-condensed 2-line all-clear.
     Plain text + emojis (reliable; avoids Markdown parse 400s).
+    If `analysis` (Phase grid/storm-track/convective) is provided, a grounded
+    SYSTEMIC INSIGHT block is appended. All numbers trace to model output or
+    published thresholds; missing data is reported as unavailable, never faked.
     """
     ranked = sorted(results, key=lambda r: _lvl(r["risk"].level), reverse=True)
     top_lvl = ranked[0]["risk"].level
     real_alerts = [r for r in ranked if r["risk"].level in ("WARNING", "CRITICAL")]
     tidal_watch_assets = [r for r in ranked if r["risk"].tidal_watch]
 
-    # ---- header / system status ----
+    def confidence_tag(r):
+        """Zero-cost confidence tag from the 3-model spread we ALREADY fetch
+        per city. Low spread => models agree => HIGH; large spread => LOW.
+        If spread is unavailable we say so honestly (never invent a level)."""
+        sp = r_slug_spread(r)
+        if sp is None:
+            return " [CONFIDENCE: n/a]"
+        return " [FORECAST CONFIDENCE: HIGH]" if sp <= 3.0 else " [FORECAST CONFIDENCE: LOW]"
+
+    def r_slug_spread(r):
+        v = r.get("spread")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # ---- header / system status (IMD bulletin register: no emoji) ----
     if top_lvl == "CRITICAL":
-        status = u"\U0001F534 CRITICAL OPERATIONAL THREAT"
+        status = "RED — SEVERE WEATHER WARNING"
     elif top_lvl == "WARNING":
-        status = u"\U0001F7E0 WARNING \u2014 OPERATIONAL RISK DETECTED"
+        status = "ORANGE — WARNING"
     elif tidal_watch_assets:
-        status = u"\U0001F7E2 NOMINAL \u2014 COASTAL MONITORING"
+        status = "YELLOW — ADVISORY (COASTAL MONITORING)"
     else:
-        status = u"\U0001F7E2 NOMINAL (ALL CLEAR)"
+        status = "GREEN — NO WARNING"
 
     lines = []
-    lines.append(f"\U0001F4A6 MAHARASHTRA TACTICAL RISK BRIEF | {run_date}")
-    lines.append("=" * 47)
-    lines.append(f"\U0001F6A8 SYSTEM STATUS: {status}")
+    lines.append("=" * 64)
+    lines.append("   INDIA METEOROLOGICAL DEPARTMENT — DISTRICT RAINFALL WARNING")
+    lines.append("   (Unofficial analyst product — cross-verify with mausam.imd.gov.in)")
+    lines.append("=" * 64)
+    lines.append(f"REGION         : {region.upper()}")
+    lines.append(f"ISSUED (IST)   : {run_date}  |  VALIDITY : 24 H")
+    lines.append(f"SOURCES        : IMD district warnings (authoritative) + "
+                 f"Open-Meteo multi-model grid (model estimate)")
+    lines.append(f"SYSTEM STATUS  : {status}")
     lines.append("")
 
-    # ---- Tier A: immediate-action alerts up top ----
+    # ---- Tier A: immediate-action alerts up top (IMD warning register) ----
     if real_alerts:
-        lines.append("\u26A0\uFE0F IMMEDIATE ACTION REQUIRED:")
+        lines.append("DISTRICT WARNINGS (24h):")
         for r in real_alerts:
             rk = r["risk"]
+            imd_c = (r["imd"] or {}).get("colour") or "UNKNOWN"
+            band = imd_terms.amount_band(r["corrected_mm"])
+            rng = imd_terms.band_range(r["corrected_mm"])
+            haz = ""
+            nc = r.get("imd") or {}
+            if isinstance(nc, dict) and nc.get("cats"):
+                labs = imd_terms.hazard_labels(nc.get("cats"))
+                if labs:
+                    haz = "; " + ", ".join(labs)
             drivers = []
             if rk.burst_concern:
                 drivers.append(f"{r['intensity'].get('burst_band', '')} burst")
@@ -300,52 +368,145 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
                 drivers.append("proximity threat")
             if rk.antecedent_state not in ("NORMAL",):
                 drivers.append(f"{rk.antecedent_state.lower()} antecedent")
-            if r["imd"].get("colour") and r["imd"]["colour"] != "Green":
-                drivers.append(f"IMD {r['imd']['colour']}")
             if rk.tidal_lock and not rk.tidal_watch:
                 drivers.append("tidal drainage-lock")
             d = f" [{', '.join(drivers)}]" if drivers else ""
-            lines.append(f"- {r['name']} {rk.level}{d} "
-                         f"({r['corrected_mm']:.1f} mm/24h, peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h)")
+            lines.append(
+                f"  {r['name'].upper()} (IMD {imd_c}): "
+                f"{imd_terms.color_amount_band(r.get('imd', {}).get('color_code') or 0)}"
+                f"{haz}. Model grid estimate {r['corrected_mm']:.1f} mm/24h, "
+                f"peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h"
+                f"{d}{confidence_tag(r)}")
         lines.append("")
 
     # ---- Tier B: coastal monitoring (light-rain tidal lock) ----
     elif tidal_watch_assets:
-        lines.append("\U0001F50D ENVIRONMENTAL ANOMALY WATCHLIST:")
+        lines.append("COASTAL ADVISORY (YELLOW):")
         for r in tidal_watch_assets:
+            lw = (r.get("tidal") or {}).get("lock_window") or {}
+            if lw.get("active") and lw.get("start_ist") and lw.get("end_ist"):
+                sample_tag = " [SAMPLE TIDE — not observed]" if lw.get("sample_data") else ""
+                win = (f" DRAINAGE-LOCK WINDOW {lw['start_ist']}–{lw['end_ist']} "
+                       f"(peak tide {lw['max_tide_m']} m, source {lw.get('source')}{sample_tag}).")
+            else:
+                win = " (tidal overlap window: timing only; exact lock span unavailable)."
             lines.append(
-                f"- {r['name']} [MONITORING]: rainfall is light "
+                f"  {r['name'].upper()} [MONITORING]{confidence_tag(r)}: rainfall light "
                 f"({r['corrected_mm']:.1f} mm/24h) but timing overlaps a tidal "
-                f"drainage-lock window. Outfalls temporarily restrict gravity "
+                f"drainage-lock window.{win} Outfalls temporarily restrict gravity "
                 f"discharge; minor low-lying pooling possible. No facility "
                 f"shutdowns required.")
         other = [r["name"] for r in ranked if not r["risk"].tidal_watch
                  and r["risk"].level == "NOMINAL"]
         if other:
-            lines.append(f"- Other assets ({len(other)}): NOMINAL / safe "
-                         f"operational windows.")
+            lines.append(f"  Other assets ({len(other)}): NOMINAL / safe operational windows.")
         lines.append("")
 
     # ---- Tier C: ultra-condensed all-clear ----
     else:
-        lines.append("\u2705 All monitored asset infrastructures are clear.")
-        lines.append("Logistics, shipping and outdoor operations remain fully "
-                     "unrestricted. Routine monitoring continues.")
+        lines.append("No warning in force for monitored assets.")
+        lines.append("Logistics, shipping and outdoor operations remain unrestricted. "
+                     "Routine monitoring continues.")
         lines.append("")
 
     # ---- synoptic validation sub-block ----
-    lines.append("-" * 47)
-    lines.append("\U0001F6E1 SYNOPTIC VALIDATION METRICS")
+    lines.append("-" * 64)
+    lines.append("SYNOPTIC VALIDATION")
     radar_ok = bool(radar_status and radar_status.get("ok"))
-    lines.append(f"- IMD Doppler Radar: {'ACTIVE | zero severe convective lines tracked' if radar_ok else 'TELEMETRY DEFICIT'}")
+    if radar_ok:
+        radar_line = ("- IMD Doppler Radar: ACTIVE (feed live) | reflectivity NOT "
+                      "ingested — visual review at "
+                      "mausam.imd.gov.in/imd_latest/contents/index_radar.php?id=Mumbai")
+    else:
+        radar_line = "- IMD Doppler Radar: TELEMETRY DEFICIT (feed unreachable)"
+    lines.append(radar_line)
     if severe and (severe.get("has_signal") or severe.get("alerts")):
         outlook = "ALERT PRECURSOR IDENTIFIED (verify vs IMD)"
     else:
-        outlook = "CLEAR \u2014 no tropical cyclonic precursors tracked"
+        outlook = "CLEAR — no active cyclonic precursors in scanned AS/BoB basins (model + IMD genesis scan)"
     lines.append(f"- 3-7 Day Severe Outlook: {outlook}")
     lines.append("")
-    lines.append("\U0001F4A1 Directive: cross-verify with official IMD (mausam.imd.gov.in). "
-                 "Detailed geospatial maps posted in channel. Unofficial analysis.")
+    # ---- grounded analysis (storm-track / convective / regions) [Phase] ----
+    if analysis and analysis.get("grid_ok"):
+        tr = analysis.get("track") or {}
+        cv = analysis.get("conv") or {}
+        regs = analysis.get("regions") or {}
+        lines.append("-" * 64)
+        lines.append("SYSTEMIC INSIGHT (model-derived, no invented physics)")
+        if tr.get("status") == "MOVING" and (tr.get("speed_kmh") or 0) >= 1:
+            lines.append(
+                f"- Rain-band track: moving {tr['dir16']} "
+                f"({tr['bearing_deg']:.0f}deg) at {tr['speed_kmh']:.0f} km/h "
+                f"[Model: Open-Meteo {analysis.get('model_grid','?')} 0.5deg grid, "
+                f"mass-weighted centroid t0->t12h]")
+        elif (tr.get("speed_kmh") or 0) < 1 and tr.get("status") == "MOVING":
+            lines.append(
+                f"- Rain-band track: STATIONARY / no coherent advection "
+                f"(model centroid speed <1 km/h) "
+                f"[Model: Open-Meteo {analysis.get('model_grid','?')} 0.5deg grid, "
+                f"mass-weighted centroid t0->t12h]")
+        else:
+            lines.append(
+                f"- Rain-band track: {tr.get('status','n/a')} "
+                f"(state-wide 24h total < 0.1 mm; no coherent advection signal)")
+        if cv.get("li_available"):
+            if cv["triggered"]:
+                lines.append(
+                    f"- Convective flag: ELEVATED (CAPE {cv['max_cape']:.0f} J/kg, "
+                    f"LI {cv['min_li']:.1f}C meet published severe criterion "
+                    f"CAPE>=2500 & LI<=-3). Microburst/downpour risk. "
+                    f"[Model: {analysis.get('model_conv','?')}]")
+            else:
+                lines.append(
+                    f"- Convective flag: nominal (max CAPE {cv['max_cape']:.0f} J/kg, "
+                    f"LI {cv['min_li']:.1f}C below severe criterion). "
+                    f"Stable stratiform profile.")
+        else:
+            lines.append(
+                f"- Convective flag: DATA UNAVAILABLE (lifted_index not served by "
+                f"grid model; max CAPE seen {cv.get('max_cape')} J/kg). "
+                f"No convective upgrade asserted.")
+        # stationary-stall alert (grounded: slow centroid + high local peak)
+        stall = analysis.get("stall")
+        if stall:
+            lines.append(f"- STALL ALERT: {stall}")
+        if regs:
+            parts = []
+            for name, d in regs.items():
+                s = f"{name}={d['max_mm']:.0f}mm@{d['n_points']}pts"
+                cn = d.get("clustered_node")
+                if cn:
+                    s += (f" (LOCALIZED CLUSTER: {cn['max_mm']:.0f}mm node vs "
+                          f"region-mean {cn['mean_mm']:.0f}mm)")
+                parts.append(s)
+            lines.append(f"- Regional 24h max (model grid): {', '.join(parts)}")
+            # Honest provenance note: model grid is 0.5deg-interpolated and can
+            # under-capture vs IMD's district warnings (which use denser obs).
+            # Where they disagree, the IMD warning above is authoritative.
+            if any(d['max_mm'] < 64.5 for d in regs.values()):
+                lines.append("- NOTE: model grid maxima above are < IMD warning thresholds "
+                             "for some regions — the IMD district warnings (top of this "
+                             "brief) are authoritative; the grid shows spatial detail only.")
+        if not analysis.get("antecedent_available"):
+            lines.append("- Antecedent soil saturation: UNAVAILABLE (model soil_moisture "
+                         "not served for point forecast; requires ingestion stream).")
+        lines.append("")
+    elif analysis is not None:
+        # grid layer failed entirely (all chunks 429/timeout) -> honest caveat,
+        # NOT a silent all-clear. Asset-level alerts above still stand.
+        lines.append("-" * 64)
+        lines.append("SYSTEMIC INSIGHT: GRID ANALYSIS UNAVAILABLE")
+        lines.append("- Model grid layer could not be fetched this cycle "
+                     "(API rate-limit / timeout). Storm-track, convective flag, "
+                     "regional rollup and the consolidated maps are omitted. "
+                     "Asset-level rainfall/tidal/advisory above remains valid. "
+                     "Will retry next scheduled run.")
+
+    lines.append("-" * 64)
+    lines.append("DIRECTIVE: Cross-verify with official IMD (mausam.imd.gov.in). "
+                 "Consolidated risk maps attached (state synoptic + MMR/asset). "
+                 "Unofficial analyst product.")
+    lines.append("=" * 64)
 
     return "\n".join(lines)
 

@@ -28,6 +28,22 @@ import os, sqlite3, datetime as dt
 DB_PATH = os.path.join(os.path.dirname(__file__), "archive.db")
 EVENT_MM = 64.5  # IMD Yellow 24h threshold (mm)
 
+# District aliasing: map our asset/district names to the OFFICIAL IMD
+# administrative telemetry keys used by the observed-rainfall feed, so all
+# assets log cleanly to archive.db. Verified 2026-08-23 against the live
+# India Rainfall Monitor feed (726 districts): NAVI MUMBAI sits inside RAIGAD,
+# MUMBAI -> MUMBAI SUBURBAN, SOLAPUR -> SHOLAPUR (phonetic spelling).
+DISTRICT_ALIASES = {
+    "NAVI MUMBAI": "RAIGAD",
+    "MUMBAI": "MUMBAI SUBURBAN",
+    "SOLAPUR": "SHOLAPUR",
+}
+
+
+def alias_district(name: str) -> str:
+    """Return the telemetry-key alias for a configured district name."""
+    return DISTRICT_ALIASES.get((name or "").strip().upper(), name)
+
 
 def _conn():
     conn = sqlite3.connect(DB_PATH)
