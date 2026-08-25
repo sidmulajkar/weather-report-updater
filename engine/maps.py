@@ -929,28 +929,40 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
         fig2.savefig(frame_path, bbox_inches="tight"); plt.close(fig2)
         frame_paths.append(frame_path)
 
-    if len(frame_paths) <= 1:
-        # single frame → save as static PNG, skip GIF
+    if not frame_paths:
+        # no frames at all -> create a single-frame GIF placeholder
+        fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
+        axes2[0].text(0.5, 0.5, "DATA UNAVAILABLE\nMMR zoom source data missing",
+                      ha="center", va="center", fontsize=11, color="#333333")
+        axes2[0].set_title("Mumbai Metro Region 0.1deg Zoom (+ outfalls)\n(unavailable)", fontsize=10)
+        axes2[0].axis("off")
+        axes2[1].text(0.5, 0.5, "DATA UNAVAILABLE\nRadar source data missing",
+                      ha="center", va="center", fontsize=11, color="#333333")
+        axes2[1].set_title("IMD Doppler Radar Mosaic (observed reflectivity)\n(unavailable)", fontsize=10)
+        axes2[1].axis("off")
+        fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
+        fig2.tight_layout(pad=3.0)
+        frame_path = os.path.join(_frames_dir, "frame_000.png")
+        fig2.savefig(frame_path, bbox_inches="tight"); plt.close(fig2)
+        frame_paths = [frame_path]
+
+    # Always emit an animated GIF so the 2-image contract is preserved.
+    # If there's only 1 frame, duplicate it into a looping 1-frame GIF.
+    try:
+        from PIL import Image
+        frames = [Image.open(fp).convert("RGB") for fp in frame_paths]
+        p2 = os.path.join(out_dir, "mmr_asset_brief.gif")
+        if len(frames) == 1:
+            frames.append(frames[0])
+        frames[0].save(p2, save_all=True, append_images=frames[1:],
+                       duration=800, loop=0, optimize=True)
+        print(f"[*] animated mmr_asset_brief.gif: {len(frames)} frames")
+    except Exception as e:
+        print(f"[!] GIF assembly failed: {e}; falling back to static PNG")
         p2 = os.path.join(out_dir, "mmr_asset_brief.png")
         if frame_paths:
             import shutil; shutil.copy(frame_paths[0], p2)
-        outs.append(p2)
-    else:
-        # assemble animated GIF from frames
-        try:
-            from PIL import Image
-            frames = [Image.open(fp).convert("RGB") for fp in frame_paths]
-            p2 = os.path.join(out_dir, "mmr_asset_brief.gif")
-            frames[0].save(p2, save_all=True, append_images=frames[1:],
-                           duration=800, loop=0, optimize=True)
-            outs.append(p2)
-            print(f"[*] animated mmr_asset_brief.gif: {len(frames)} frames")
-        except Exception as e:
-            print(f"[!] GIF assembly failed: {e}; falling back to static PNG")
-            p2 = os.path.join(out_dir, "mmr_asset_brief.png")
-            if frame_paths:
-                import shutil; shutil.copy(frame_paths[0], p2)
-            outs.append(p2)
+    outs.append(p2)
 
     # cleanup temp frames
     try:
