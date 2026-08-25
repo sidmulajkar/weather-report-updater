@@ -52,7 +52,7 @@ def load_cfg():
 
 def main():
     cfg = load_cfg()
-    today = dt.date.today().isoformat()
+    today = dt.datetime.now(INDIA).date().isoformat()
     locs = cfg["locations"]
     models = cfg["models"]
     window = cfg.get("accum_window_h", 24)
