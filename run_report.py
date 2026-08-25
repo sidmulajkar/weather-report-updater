@@ -15,7 +15,7 @@ INDIA = ZoneInfo("Asia/Kolkata")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-BASE = HERE  # config/, engine/, output/ all live under weather-updater/
+BASE = HERE  # config/, engine/, output/ all live under weather-report-updater/
 
 from engine import fetch_openmeteo as om
 from engine import fetch_metno

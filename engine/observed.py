@@ -13,7 +13,7 @@ from __future__ import annotations
 import requests
 
 LATEST_URL = "https://sayantan-aquacarta.github.io/rainfall-pipeline/api/latest.json"
-HEADERS = {"User-Agent": "weather-updater/2.0 (local research; +github rainfall-pipeline)"}
+HEADERS = {"User-Agent": "weather-report-updater/2.0 (local research; +github rainfall-pipeline)"}
 
 
 def fetch_observed(timeout: int = 25) -> dict:

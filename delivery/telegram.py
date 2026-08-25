@@ -134,4 +134,4 @@ def _post_files(url, data, files, pace):
 
 if __name__ == "__main__":
     # quick self-test (dry-run)
-    send_message("TEST", "hello from weather-updater (dry-run)")
+    send_message("TEST", "hello from weather-report-updater (dry-run)")

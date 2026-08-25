@@ -44,7 +44,7 @@ except Exception:  # allow standalone import / tests
 _DAILY_BAN = False
 
 RSMC_GENESIS = "https://rsmcnewdelhi.imd.gov.in/genesis-forecast.php"
-HEADERS = {"User-Agent": "Mozilla/5.0 (weather-updater research; +local)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (weather-report-updater research; +local)"}
 
 
 # TC-gen search boxes (lat, lon corners) over the two basins

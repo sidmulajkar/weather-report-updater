@@ -7,7 +7,7 @@ so they are fast and deterministic. Run:  python engine/sim_scenarios.py
 from __future__ import annotations
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))  # parent = weather-updater/, so `engine` imports
+sys.path.insert(0, os.path.dirname(HERE))  # parent = weather-report-updater/, so `engine` imports
 
 import engine.classify as classify
 import engine.tides as tides

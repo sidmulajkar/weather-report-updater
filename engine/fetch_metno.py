@@ -13,7 +13,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
-HEADERS = {"User-Agent": "weather-updater/2.0 (local research; contact local)"}
+HEADERS = {"User-Agent": "weather-report-updater/2.0 (local research; contact local)"}
 
 
 def fetch(lat: float, lon: float, hours: int = 24) -> dict:

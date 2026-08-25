@@ -6,7 +6,7 @@ Telegram is optional (dry-run by default).
 
 ## Run (on-demand, local)
 ```bash
-cd weather-updater
+cd weather-report-updater
 ./venv1/bin/python run_report.py
 ```
 Output: `output/report.md`, `output/rainfall_map.png`, `output/wind_map.png`.

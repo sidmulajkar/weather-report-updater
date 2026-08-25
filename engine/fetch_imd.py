@@ -35,7 +35,7 @@ import requests
 
 WFS = "https://reactjs.imd.gov.in/geoserver/imd/ows"
 IMG_BASE = "https://mausam.imd.gov.in"
-HDR = {"User-Agent": "Mozilla/5.0 (weather-updater research; +local)",
+HDR = {"User-Agent": "Mozilla/5.0 (weather-report-updater research; +local)",
        "Referer": "https://mausam.imd.gov.in/"}
 
 # IMD colour code -> label (verified: 1..4 = Green/Yellow/Orange/Red)

@@ -21,7 +21,7 @@ from engine import sanity
 
 WFS_URL = "https://reactjs.imd.gov.in/geoserver/imd/wfs"
 LAYER = "imd:NowcastWarningDistrict"
-HEADERS = {"User-Agent": "Mozilla/5.0 (weather-updater research; +local)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (weather-report-updater research; +local)"}
 
 # IMD colour code -> label (per IMD impact-based warnings)
 COLOR_LABEL = {1: "Green", 2: "Yellow", 3: "Orange", 4: "Red"}
