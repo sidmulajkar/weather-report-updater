@@ -5,6 +5,7 @@ import sys, os, glob, time
 sys.path.insert(0, os.path.dirname(__file__))
 
 import run_report as rr
+from run_report import _verify_outputs
 import delivery.telegram as tg
 
 cap = {}
@@ -29,9 +30,9 @@ tg.send_animation = fake_anim
 
 t0 = time.time()
 rr.main()
+_verify_outputs(rr.BASE + '/output', True, True)
 all_media = sent + [(f, c) for f, c, _ in sent_anim]
 print(f"\nTOTAL_RUNTIME={time.time()-t0:.1f}s  TEXT_LEN={len(cap.get('s',''))}  SENT={len(all_media)}")
-print("MAPS:", [f for f, _ in all_media])
 print("=" * 60)
 print(cap.get('s', ''))
 

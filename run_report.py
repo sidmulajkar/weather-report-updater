@@ -9,7 +9,9 @@ Data-source resilience (your "u1+u2 as backup" requirement):
   The report labels which source produced each number and never fakes a failure as all-clear.
 """
 from __future__ import annotations
-import os, sys, json, datetime as dt
+import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+import sys, json, datetime as dt
 from zoneinfo import ZoneInfo
 INDIA = ZoneInfo("Asia/Kolkata")
 
@@ -778,12 +780,53 @@ def main():
         p_timing = os.path.join(OUT, "timing_map.png")
         if os.path.exists(p_timing):
             _safe_send_photo(p_timing, "Peak rainfall timing map")
+    _verify_outputs(OUT, severe_mode, DRY)
     print("[*] done.")
 
 
-def _median(xs):
-    xs = [x for x in xs if x is not None]
-    return sum(xs) / len(xs) if xs else None
+def _verify_outputs(OUT, severe_mode, DRY):
+    """Fail loudly in CI if expected deliverables are missing or blank."""
+    required = [
+        os.path.join(OUT, "report.md"),
+        os.path.join(OUT, "state_synoptic_brief.png"),
+    ]
+    mmr_mp4 = os.path.join(OUT, "mmr_asset_brief.mp4")
+    mmr_gif = os.path.join(OUT, "mmr_asset_brief.gif")
+    if os.path.exists(mmr_mp4):
+        required.append(mmr_mp4)
+    elif os.path.exists(mmr_gif):
+        required.append(mmr_gif)
+    else:
+        required.append(mmr_mp4)  # expected path for failure message
+
+    if severe_mode:
+        required += [
+            os.path.join(OUT, "nowcast_map.png"),
+            os.path.join(OUT, "severe_map.png"),
+            os.path.join(OUT, "district_choropleth.png"),
+            os.path.join(OUT, "timing_map.png"),
+        ]
+
+    missing = [p for p in required if not os.path.exists(p)]
+    if missing:
+        print("[!] missing deliverables:")
+        for p in missing:
+            print(f"    - {p}")
+        if not DRY:
+            sys.exit(2)
+        return
+
+    blank = [p for p in required if os.path.getsize(p) < 1024]
+    if blank:
+        print("[!] suspiciously small deliverables:")
+        for p in blank:
+            print(f"    - {p} ({os.path.getsize(p)} bytes)")
+        if not DRY:
+            sys.exit(3)
+
+    print("[*] deliverables ok:")
+    for p in required:
+        print(f"    - {os.path.basename(p)} ({os.path.getsize(p):,} bytes)")
 
 
 def _fold_long_text(text: str, limit: int = 4096, fold_marker: str = "\n[...]\n") -> str:

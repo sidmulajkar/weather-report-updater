@@ -844,7 +844,11 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
     def _place(ax, base_name, title):
         p = by_base.get(base_name)
         if not p or not os.path.exists(p):
-            ax.set_title(f"{title}\n(missing)"); ax.axis("off"); return False
+            ax.text(0.5, 0.5, "DATA UNAVAILABLE\nNo source data for this panel",
+                    ha="center", va="center", fontsize=10, color="#333333")
+            ax.set_title(f"{title}\n(unavailable)", fontsize=10)
+            ax.axis("off")
+            return False
         img = mpimg.imread(p)
         ax.imshow(img); ax.set_title(title, fontsize=10); ax.axis("off")
         return True
