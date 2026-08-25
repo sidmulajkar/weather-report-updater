@@ -66,6 +66,7 @@ def transcode_gif_to_mp4(gif_path: str, mp4_path: str) -> dict:
     import subprocess
     cmd = [
         "ffmpeg", "-y", "-i", gif_path,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-crf", "23",
