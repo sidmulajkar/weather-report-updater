@@ -46,7 +46,8 @@ def onshore_note(deg):
 def compose(results: list[dict], region: str, narrative: dict = None, skill: dict = None,
             bias_mm: dict = None, observed_status: str = "unavailable",
             nowcast_status: str = "unavailable", run_date: str = "",
-            severe: dict = None, radar_status: dict = None) -> str:
+            severe: dict = None, radar_status: dict = None,
+            risk_profile: dict = None) -> str:
     now = datetime.now(INDIA)
     run_date_str = now.strftime("%d %b %Y")
     target_date_str = (now + timedelta(hours=24)).strftime("%d %b %Y")
@@ -73,17 +74,46 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
                      + ", ".join(f"{r['name']} (IMD {_imd_c(r)})"
                                  for r in active[:8]))
         top = active[0]
-        lines.append(f"**Highest priority:** {top['name']} — IMD {_imd_c(top)} "
-                     f"(operational: {top['risk'].level})")
+        _top_rp_st = (risk_profile or {}).get("strategic", "")
+        _top_rp_ta = (risk_profile or {}).get("tactical", "")
+        _top_conflict = (_top_rp_st == "STANDBY" and _top_rp_ta == "MONITOR")
+        _top_severe = (_top_rp_st == "HALT_OPERATIONS" and _top_rp_ta == "EVACUATE")
+        if _top_conflict:
+            lines.append(f"**Highest priority:** {top['name']} — IMD {_imd_c(top)} "
+                         f"(AMBER/STANDBY per source weighting — suppressing severe escalation)")
+        elif _top_severe:
+            lines.append(f"**Highest priority:** {top['name']} — IMD {_imd_c(top)} "
+                         f"(operational: {top['risk'].level})")
         if len(clustered) >= 2:
             lines.append(f"**SYSTEMIC METRO WARNING:** compounding risk across "
                          f"{', '.join(clustered)} — treat as a connected transit/logistics "
                          f"hazard, not isolated sites.")
-        # immediate actions (top 3)
-        lines.append("")
-        lines.append("**Immediate actions:**")
-        for r in active[:3]:
-            lines.append(f"  • {r['name']}: {LEVEL_ACTION[r['risk'].level]}")
+        # immediate actions (top 3) — use risk_profile directives when Lane 1
+        # horizon divergence is active, else fall back to per-level LEVEL_ACTION
+        _am = risk_profile.get("strategic") if risk_profile else None
+        _at = risk_profile.get("tactical") if risk_profile else None
+        if _am == "STANDBY" and _at == "MONITOR":
+            lines.append("")
+            lines.append("**Immediate actions (STANDBY/MONITOR — horizon conflict, suppressing severe escalation):**")
+            for r in active[:3]:
+                lines.append(f"  • {r['name']} (IMD {_imd_c(r)}): GREEN-LIGHT transit; proceed with caution, "
+                             f"visual 15-min radar check; STANDBY dewatering pre-positioned.")
+        elif _am == "HALT_OPERATIONS" and _at == "EVACUATE":
+            lines.append("")
+            lines.append("**Immediate actions (HALT_OPERATIONS/EVACUATE — severe verified across horizons):**")
+            for r in active[:3]:
+                lines.append(f"  • {r['name']}: {LEVEL_ACTION[r['risk'].level]}")
+        elif _am == "ALERT_SENSITIVE" and _at == "VISUAL_VERIFY":
+            lines.append("")
+            lines.append("**Immediate actions (ALERT_SENSITIVE/VISUAL_VERIFY — nowcast blindspot, manual cross-check):**")
+            for r in active[:3]:
+                lines.append(f"  • {r['name']} (IMD {_imd_c(r)}): proceed with caution, secondary comms; "
+                             f"mandatory 30-min visual field-check; warm-start emergency crews on standby.")
+        else:
+            lines.append("")
+            lines.append("**Immediate actions:**")
+            for r in active[:3]:
+                lines.append(f"  • {r['name']}: {LEVEL_ACTION[r['risk'].level]}")
         # atmospheric drivers
         drivers = []
         for r in active[:3]:
@@ -165,31 +195,64 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
         lines.append("  • All primary feeds nominal.")
     lines.append("")
 
-    # ============ 4. PER-ASSET DETAIL ============
+    # ============ 4. PER-ASSET DETAIL (risk-profile-aware) ===========
+    _rp_st = (risk_profile or {}).get("strategic", "")
+    _rp_ta = (risk_profile or {}).get("tactical", "")
+    _is_horizon_conflict = (_rp_st == "STANDBY" and _rp_ta == "MONITOR")
+    _is_severe_verified = (_rp_st == "HALT_OPERATIONS" and _rp_ta == "EVACUATE")
+    _is_blindspot = (_rp_st == "ALERT_SENSITIVE" and _rp_ta == "VISUAL_VERIFY")
     lines.append("— — —")
     lines.append("")
     for r in active[:5]:
         rk = r["risk"]
         imd_c = rk.imd_colour or "unavailable"
-        lines.append(f"**{r['name']}** (IMD {imd_c}, operational: {rk.level}): "
-                     f"{LEVEL_ACTION[rk.level]}")
-        obs = r.get("observed", {})
-        obs_date = obs.get("source_date")
-        obs_txt = (f"observed({obs_date})={obs.get('actual_mm')}mm"
-                   if obs.get("found") else "observed=[Telemetry Deficit]")
-        imd_c = rk.imd_colour or "unavailable"
-        lines.append(f"   basis: {rk.basis} | IMD official: {imd_c} | {obs_txt}")
-        # explicit separation of IMD data vs OPERATIONAL risk level
-        imd_lvl = {"Green": "NOMINAL", "Yellow": "ADVISORY",
-                    "Orange": "WARNING", "Red": "CRITICAL"}.get(imd_c, "NOMINAL")
-        if LEVEL_RANK[rk.level] > LEVEL_RANK.get(imd_lvl, 0):
-            lines.append(f"   OPERATIONAL OVERRIDE: IMD data = {imd_c} "
-                         f"({imd_lvl}), but operational risk = {rk.level} due to "
-                         f"local impact dynamics (see escalations).")
-        if rk.escalation_reasons:
-            lines.append(f"   escalations: {'; '.join(rk.escalation_reasons)}")
-        if r["imd"].get("message"):
-            lines.append(f"   IMD nowcast: {r['imd']['message']}")
+        if _is_horizon_conflict:
+            directive = ("GREEN-LIGHT transit; proceed with caution, visual 15-min radar check; "
+                         "STANDBY dewatering pre-positioned (horizon conflict suppressing severe escalation).")
+            hdr_level = rk.level  # show actual level, no asterisk
+        elif _is_severe_verified:
+            directive = LEVEL_ACTION[rk.level]
+        elif _is_blindspot:
+            directive = ("proceed with caution, secondary comms; mandatory 30-min visual field-check; "
+                         "warm-start emergency crews on standby (nowcast blindspot).")
+        else:
+            directive = LEVEL_ACTION[rk.level]
+        hdr_level = rk.level  # no asterisk; actual level shown plainly
+        if (r.get("imd") or {}).get("degraded"):
+            # No WMS severity this cycle. State no severity rather than falling
+            # back to the WFS attribute, which is a known-disagreeing field.
+            lines.append(f"**{r['name']}** (IMD severity UNAVAILABLE - telemetry degraded): ")
+            lines.append(f"   {directive}")
+            obs = r.get("observed", {})
+            obs_date = obs.get("source_date")
+            obs_txt = (f"observed({obs_date})={obs.get('actual_mm')}mm"
+                       if obs.get("found") else "observed=[Telemetry Deficit]")
+            lines.append(f"   basis: {rk.basis} | IMD severity unavailable — "
+                         f"verify vs radar | {obs_txt}")
+        elif _is_horizon_conflict:
+            # Under AMBER/LIGHT/STANDBY: suppress the operational level + escalation
+            # reasons (they are the raw RED-level data that the source-weighting
+            # decision disagreed with). Show the same light form as the Telegram
+            # Tier A line: IMD colour + model estimate + directive only.
+            lines.append(f"**{r['name']}** (IMD {imd_c}): ")
+            lines.append(f"   {directive}")
+            obs = r.get("observed", {})
+            obs_date = obs.get("source_date")
+            obs_txt = (f"observed({obs_date})={obs.get('actual_mm')}mm"
+                       if obs.get("found") else "observed=[Telemetry Deficit]")
+            lines.append(f"   basis: {rk.basis} | IMD official: {imd_c} | {obs_txt}")
+        else:
+            lines.append(f"**{r['name']}** (IMD {imd_c}, operational: {hdr_level}): ")
+            lines.append(f"   {directive}")
+            obs = r.get("observed", {})
+            obs_date = obs.get("source_date")
+            obs_txt = (f"observed({obs_date})={obs.get('actual_mm')}mm"
+                       if obs.get("found") else "observed=[Telemetry Deficit]")
+            lines.append(f"   basis: {rk.basis} | IMD official: {imd_c} | {obs_txt}")
+            if rk.escalation_reasons:
+                lines.append(f"   escalations: {'; '.join(rk.escalation_reasons)}")
+            if r["imd"].get("message"):
+                lines.append(f"   IMD nowcast: {r['imd']['message']}")
     lines.append("")
 
     # ============ 5. GROUND-TRUTH VERIFICATION LOG ============
@@ -290,7 +353,8 @@ def _html_summary(summary: str) -> str:
 
 
 def summarize(results: list[dict], region: str, run_date: str, severe: dict,
-              radar_status: dict = None, analysis: dict = None) -> str:
+              radar_status: dict = None, analysis: dict = None,
+              risk_profile: dict = None) -> str:
     """Smart, adaptive ONE-PARAGRAPH-ish Telegram briefing (HTML-safe, <4096 chars).
 
     Tier routing off the ALREADY-COMPUTED risk objects (never re-derives severity,
@@ -326,14 +390,23 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
             return None
 
     # ---- header / system status (IMD bulletin register: no emoji) ----
-    if top_lvl == "CRITICAL":
-        status = "RED — SEVERE WEATHER WARNING"
-    elif top_lvl == "WARNING":
-        status = "ORANGE — WARNING"
-    elif tidal_watch_assets:
-        status = "YELLOW — ADVISORY (COASTAL MONITORING)"
+    # When Lane 1 source weighting is available (cross-horizon divergence
+    # assessed), use its status; otherwise fall back to the per-level router.
+    if risk_profile:
+        status = risk_profile.get("status", "")
+        if not status:
+            rp_st = risk_profile.get("strategic", "")
+            rp_ta = risk_profile.get("tactical", "")
+            status = f"{rp_st} / {rp_ta}"
     else:
-        status = "GREEN — NO WARNING"
+        if top_lvl == "CRITICAL":
+            status = "RED — SEVERE WEATHER WARNING"
+        elif top_lvl == "WARNING":
+            status = "ORANGE — WARNING"
+        elif tidal_watch_assets:
+            status = "YELLOW — ADVISORY (COASTAL MONITORING)"
+        else:
+            status = "GREEN — NO WARNING"
 
     lines = []
     lines.append("=" * 64)
@@ -341,13 +414,30 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
     lines.append("   (Unofficial analyst product — cross-verify with mausam.imd.gov.in)")
     lines.append("=" * 64)
     lines.append(f"REGION         : {region.upper()}")
-    lines.append(f"ISSUED (IST)   : {run_date}  |  VALIDITY : 24 H")
-    lines.append(f"SOURCES        : IMD district warnings (authoritative) + "
-                 f"Open-Meteo multi-model grid (model estimate)")
+    # Explicit window, anchored to NOW — a bare "24 H" hides the fact that the
+    # model slice is anchored to the current hour, not to midnight.
+    try:
+        _now = datetime.now(INDIA)
+        _win = 24
+        _start_s = _now.strftime("%d %b %Y %H:%M")
+        _end_s = (_now + timedelta(hours=_win)).strftime("%d %b %Y %H:%M")
+        lines.append(f"ISSUED (IST)   : {_start_s}")
+        lines.append(f"VALID (IST)    : {_start_s} -> {_end_s}  ({_win}h from now)")
+    except Exception:
+        lines.append(f"ISSUED (IST)   : {run_date}  |  VALIDITY : 24 H")
+    lines.append(f"SOURCES        : IMD rendered warning map (WMS, palette-validated) "
+                 f"+ Open-Meteo multi-model grid (model estimate)")
     lines.append(f"SYSTEM STATUS  : {status}")
     lines.append("")
 
     # ---- Tier A: immediate-action alerts up top (IMD warning register) ----
+    # When Lane 1 source weighting is active (cross-horizon divergence), DON'T
+    # assert the raw IMD band text as operational truth — it agrees with the
+    # source-weighting suppression. Print the IMD warning colour + model estimate
+    # without the "Extremely heavy... likely" operational assertion.
+    _horizon_conflict = (risk_profile and
+                         risk_profile.get("strategic") == "STANDBY" and
+                         risk_profile.get("tactical") == "MONITOR")
     if real_alerts:
         lines.append("DISTRICT WARNINGS (24h):")
         for r in real_alerts:
@@ -370,13 +460,34 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
                 drivers.append(f"{rk.antecedent_state.lower()} antecedent")
             if rk.tidal_lock and not rk.tidal_watch:
                 drivers.append("tidal drainage-lock")
-            d = f" [{', '.join(drivers)}]" if drivers else ""
-            lines.append(
-                f"  {r['name'].upper()} (IMD {imd_c}): "
-                f"{imd_terms.color_amount_band(r.get('imd', {}).get('color_code') or 0)}"
-                f"{haz}. Model grid estimate {r['corrected_mm']:.1f} mm/24h, "
-                f"peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h"
-                f"{d}{confidence_tag(r)}")
+            d = f" [{' ,'.join(drivers)}]" if drivers else ""
+            # No WMS severity this cycle (tile failed / off-palette). We do NOT
+            # substitute the WFS attribute: it is a known-disagreeing field. The
+            # safe degradation is no severity plus a verify instruction.
+            _degraded = bool((r.get("imd") or {}).get("degraded"))
+            if _degraded:
+                lines.append(
+                    f"  {r['name'].upper()} (IMD severity UNAVAILABLE): model "
+                    f"{r['corrected_mm']:.1f} mm/24h, peak "
+                    f"{r['intensity'].get('max1h_mm', 0):.0f} mm/h"
+                    f" [TELEMETRY DEGRADED - verify vs radar]")
+            elif _horizon_conflict:
+                # Flag the disagreement AT THE POINT OF USE. Printing an IMD Red
+                # band next to a ~0 mm model number with no marker hides that
+                # these are two sources in conflict, not one coherent forecast.
+                lines.append(
+                    f"  {r['name'].upper()} (IMD {imd_c}): model "
+                    f"{r['corrected_mm']:.1f} mm/24h, peak "
+                    f"{r['intensity'].get('max1h_mm', 0):.0f} mm/h"
+                    f" | SOURCES DISAGREE (IMD {imd_c} 24h vs {r['corrected_mm']:.1f} mm model)"
+                    f"{d}{confidence_tag(r)}")
+            else:
+                lines.append(
+                    f"  {r['name'].upper()} (IMD {imd_c}): "
+                    f"{imd_terms.color_amount_band(r.get('imd', {}).get('color_code') or 0)}"
+                    f"{haz}. Model grid estimate {r['corrected_mm']:.1f} mm/24h, "
+                    f"peak {r['intensity'].get('max1h_mm', 0):.0f} mm/h"
+                    f"{d}{confidence_tag(r)}")
         lines.append("")
 
     # ---- Tier B: coastal monitoring (light-rain tidal lock) ----
@@ -420,11 +531,35 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
     else:
         radar_line = "- IMD Doppler Radar: TELEMETRY DEFICIT (feed unreachable)"
     lines.append(radar_line)
+    # Synoptic outlook. Three states, not two:
+    #   1. corroborated signal  -> severity statement (needs a sustained closed
+    #      low with 850 hPa vorticity support, not a bare pressure minimum)
+    #   2. sub-1006 hPa minimum -> HEDGED measurement, verdict explicitly
+    #      withheld. The delivered MSLP map already plots this number, so
+    #      printing "CLEAR" beside it is the contradiction this prevents.
+    #   3. otherwise            -> CLEAR
+    _low_notes = (severe or {}).get("low_notes") or []
     if severe and (severe.get("has_signal") or severe.get("alerts")):
         outlook = "ALERT PRECURSOR IDENTIFIED (verify vs IMD)"
+    elif _low_notes:
+        outlook = ("LOW NOTED — " + "; ".join(_low_notes)
+                   + " | no closed circulation corroborated in model scan; "
+                     "below IMD depression threshold; verify vs IMD Tropical "
+                     "Weather Outlooks")
     else:
         outlook = "CLEAR — no active cyclonic precursors in scanned AS/BoB basins (model + IMD genesis scan)"
     lines.append(f"- 3-7 Day Severe Outlook: {outlook}")
+    # State the 3h nowcast provenance explicitly. A Green 3h that drives an
+    # AMBER verdict is load-bearing, so the reader must be able to see whether
+    # it is fresh, stale, or absent rather than taking it on faith.
+    if risk_profile and risk_profile.get("strategic") == "ALERT_SENSITIVE" \
+            and risk_profile.get("tactical") == "VISUAL_VERIFY":
+        lines.append("- 3h Nowcast: UNAVAILABLE — 3h horizon INDETERMINATE. "
+                     "NOT an all-clear; 24h register stands.")
+    elif _horizon_conflict:
+        lines.append("- 3h Nowcast: live, worst district "
+                     f"{risk_profile.get('nowcast_3h', 'Green')}. Divergence from the "
+                     "24h band is reported, not resolved — verify vs radar.")
     lines.append("")
     # ---- grounded analysis (storm-track / convective / regions) [Phase] ----
     if analysis and analysis.get("grid_ok"):
@@ -492,21 +627,51 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
                          "not served for point forecast; requires ingestion stream).")
         lines.append("")
     elif analysis is not None:
-        # grid layer failed entirely (all chunks 429/timeout) -> honest caveat,
-        # NOT a silent all-clear. Asset-level alerts above still stand.
-        lines.append("-" * 64)
-        lines.append("SYSTEMIC INSIGHT: GRID ANALYSIS UNAVAILABLE")
-        lines.append("- Model grid layer could not be fetched this cycle "
-                     "(API rate-limit / timeout). Storm-track, convective flag, "
-                     "regional rollup and the consolidated maps are omitted. "
-                     "Asset-level rainfall/tidal/advisory above remains valid. "
-                     "Will retry next scheduled run.")
+        # Distinguish the two reasons the grid layer is missing. `grid_ok=False`
+        # is set BOTH when the fetch genuinely failed AND when the LIGHT-payload
+        # gate skipped it on purpose — saying "API rate-limit / timeout" for a
+        # deliberate skip is a false statement to the reader.
+        if analysis.get("grid_skipped"):
+            lines.append("-" * 64)
+            lines.append("SYSTEMIC INSIGHT: OMITTED (LIGHT PAYLOAD)")
+            lines.append("- Grid analysis was intentionally not run: the source-weighting "
+                         "profile resolved to a LIGHT payload, so the expensive grid "
+                         "stage was skipped to keep this briefing fast. This is a "
+                         "deliberate omission, NOT a data outage. Storm-track, "
+                         "convective flag and regional rollup are therefore absent; "
+                         "asset-level warnings above are unaffected. Full grid "
+                         "analysis runs automatically on the next HEAVY cycle.")
+        else:
+            lines.append("-" * 64)
+            lines.append("SYSTEMIC INSIGHT: GRID ANALYSIS UNAVAILABLE")
+            lines.append("- Model grid layer could not be fetched this cycle "
+                         "(API rate-limit / timeout). Storm-track, convective flag, "
+                         "regional rollup and the consolidated maps are omitted. "
+                         "Asset-level rainfall/tidal/advisory above remains valid. "
+                         "Will retry next scheduled run.")
 
     lines.append("-" * 64)
+    # Only claim attached maps when the composites actually carry data. Under the
+    # LIGHT-payload gate the grid panels are never rendered, so claiming "risk maps
+    # attached" over blank placeholders is a false statement to the reader.
+    _grid_had_panels = bool(analysis and analysis.get("grid_ok"))
+    _media_clause = ("Consolidated risk maps attached (state synoptic + MMR/asset). "
+                     if _grid_had_panels else
+                     "No grid composites this cycle (LIGHT payload — see above).")
     lines.append("DIRECTIVE: Cross-verify with official IMD (mausam.imd.gov.in). "
-                 "Consolidated risk maps attached (state synoptic + MMR/asset). "
+                 f"{_media_clause} "
                  "Unofficial analyst product.")
     lines.append("=" * 64)
+
+    # Lane 2: protocol footer — maps strategic/tactical to site directives
+    if risk_profile:
+        pf = _protocol_footer(risk_profile)
+        lines.append("")
+        lines.append("=" * 64)
+        lines.append("OPERATIONAL PROTOCOLS (ACTION DIRECTIVES)")
+        lines.append("=" * 64)
+        lines.append(pf)
+        lines.append("=" * 64)
 
     return "\n".join(lines)
 
@@ -526,3 +691,116 @@ if __name__ == "__main__":
               "radar": {"status": "ok"}, "imd": {"colour": "Green"},
               "observed": {"found": False}, "source": "open-meteo", "raw_mm": 120, "corrected_mm": 120}]
     print(compose(dummy, "Maharashtra", radar_status={"ok": True}))
+
+
+# ── Lane 1: Source Weighting Engine ──────────────────────────────────────────
+# Weighs 24h regional outlook against 3h real-time nowcasts to eliminate
+# horizon conflicts (e.g., IMD Red 24h vs Green 3h nowcast = AMBER_CONFLICT).
+ALERT_WEIGHTS = {'Green': 0, 'Yellow': 1, 'Orange': 2, 'Red': 3}
+
+
+def _weight_to_colour(w: int) -> str:
+    """Inverse of ALERT_WEIGHTS: numeric weight (0-3) -> colour string."""
+    for c, v in ALERT_WEIGHTS.items():
+        if v == w:
+            return c
+    return "Green"
+
+
+def _pick_horizons(results: list[dict]):
+    """Scan per-city IMD 3h nowcast fields.
+
+    Return (worst_nc_weight, nc_avail, nc_miss).
+
+    Reads ONLY the nowcast colour. It deliberately does NOT fall back to
+    `color_label` (the 24h warning colour) — doing so would make a missing
+    nowcast look like a Red 3h reading, and would make "no nowcast" and "Red
+    nowcast" indistinguishable at the call site.
+    """
+    nc_max = 0
+    nc_avail = 0
+    nc_miss = 0
+    for _r in results:
+        _imd = _r.get("imd") or {}
+        _nc = _imd.get("nowcast_colour")
+        if _nc and _nc.lower() not in ("unavailable", "indeterminate", ""):
+            nc_avail += 1
+            _w = ALERT_WEIGHTS.get(_nc, 0)
+            if _w > nc_max:
+                nc_max = _w
+        else:
+            nc_miss += 1
+    return nc_max, nc_avail, nc_miss
+
+
+class OperationalRiskEngine:
+    @classmethod
+    def evaluate(cls, outlook_24h: str, nowcast_3h: str|None = None) -> dict:
+        w_24h = ALERT_WEIGHTS.get(outlook_24h, 0)
+        # Blindspot check FIRST: missing/unknown nowcast data
+        if nowcast_3h in (None, '', 'UNKNOWN', 'INSUFFICIENT_DATA'):
+            return {'status': 'AMBER — NOWCAST BLINDSPOT',
+                    'strategic': 'ALERT_SENSITIVE', 'tactical': 'VISUAL_VERIFY',
+                    'payload': 'LIGHT',
+                    'outlook_24h': outlook_24h, 'nowcast_3h': None,
+                    'action_msg': 'Nowcast feed down/unparsed. Rely on 24h metrics with manual cross-checks.'}
+        w_3h = ALERT_WEIGHTS.get(nowcast_3h, 0)
+        delta = w_24h - w_3h
+        if delta >= 2:
+            return {'status': 'AMBER — HORIZON CONFLICT',
+                    'strategic': 'STANDBY', 'tactical': 'MONITOR',
+                    'payload': 'LIGHT',
+                    'outlook_24h': outlook_24h, 'nowcast_3h': nowcast_3h,
+                    'action_msg': f'Discrepancy between 24h ({outlook_24h}) and 3h ({nowcast_3h}). Suppressing severe alerts.'}
+        elif w_24h >= 2 and w_3h >= 2:
+            return {'status': 'RED — SEVERE WEATHER WARNING',
+                    'strategic': 'HALT_OPERATIONS', 'tactical': 'EVACUATE',
+                    'payload': 'HEAVY',
+                    'outlook_24h': outlook_24h, 'nowcast_3h': nowcast_3h,
+                    'action_msg': 'Severe weather verified across horizons. Execute field safety protocols.'}
+        return {'status': 'GREEN — NOMINAL OPERATIONAL CONDITION',
+                'strategic': 'PROCEED', 'tactical': 'NORMAL_OPS',
+                'outlook_24h': outlook_24h, 'nowcast_3h': nowcast_3h,
+                'payload': 'LIGHT',
+                'action_msg': 'All horizons clear or light precipitation.'}
+        return {'status': 'GREEN — NOMINAL OPERATIONAL CONDITION', 'strategic': 'PROCEED', 'tactical': 'NORMAL_OPS', 'payload': 'LIGHT', 'action_msg': 'All horizons clear or light precipitation.'}
+
+def _protocol_footer(rp):
+    F = {
+        ('STANDBY','MONITOR'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Green-light transit; ON-SITE=Proceed with caution, visual 15-min radar; EMERGENCY=STANDBY dewatering.',
+        ('HALT_OPERATIONS','EVACUATE'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Halt all movement, reroute freight; ON-SITE=Immediate halt outdoor/height work; EMERGENCY=Execute low-lying evacuations.',
+        ('ALERT_SENSITIVE','VISUAL_VERIFY'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Proceed with caution, secondary comms; ON-SITE=Mandatory 30-min visual field-checks; EMERGENCY=Warm start emergency crews.',
+        ('PROCEED','NORMAL_OPS'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Nominal, standard schedules; ON-SITE=Standard operations; EMERGENCY=Monitor routine intervals.',
+    }
+    return F.get((rp.get('strategic'), rp.get('tactical')), F[('PROCEED','NORMAL_OPS')])
+
+def compose_with_risk_profile(results, region, narrative=None, skill=None, bias_mm=None,
+                              observed_status=None, nowcast_status=None, run_date=None,
+                              severe=None, radar_status=None, risk_profile=None):
+    body = compose(results, region, narrative=narrative, skill=skill, bias_mm=bias_mm,
+                   observed_status=observed_status, nowcast_status=nowcast_status,
+                   run_date=run_date, severe=severe, radar_status=radar_status,
+                   risk_profile=risk_profile)
+    out = ['='*64]
+    out.append(f'MAHARASHTRA OPERATIONAL RAINFALL RISK - next 24h ({run_date or results[0].get("window_start","")[:10] if results else ""})')
+    out.append(f'Run: {run_date or "n/a"} (IST)')
+    if risk_profile:
+        out.append(f'SYSTEM STATUS: {risk_profile.get("status","NOT EVALUATED")}')
+        out.append('')
+        out.append(f'Source weighting: {risk_profile.get("status","?")} [24h={risk_profile.get("_outlook_24h","?")}, 3h={risk_profile.get("_nowcast_3h","?")}, delta={risk_profile.get("delta","n/a")}]')
+        out.append(f'  Strategic: {risk_profile.get("strategic","?")} | Tactical: {risk_profile.get("tactical","?")}')
+        out.append(f'  Payload profile: {risk_profile.get("payload","LIGHT")}')
+        out.append(f'  Action: {risk_profile.get("action_msg","")}')
+    else:
+        out.append('SYSTEM STATUS: NOT EVALUATED')
+        out.append('Source weighting: n/a')
+    out.append('='*64)
+    out.append('')
+    out.append(body)
+    out.append('')
+    out.append('='*64)
+    out.append('OPERATIONAL PROTOCOLS (ACTION DIRECTIVES)')
+    out.append('='*64)
+    out.append(_protocol_footer(risk_profile if risk_profile else {'strategic':'PROCEED','tactical':'NORMAL_OPS'}))
+    out.append('=' * 64)
+    return "\n".join(out)

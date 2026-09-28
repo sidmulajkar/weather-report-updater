@@ -21,6 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.tri import Triangulation
+from engine.fetch_openmeteo import current_hour_offset
 from matplotlib.ticker import ScalarFormatter
 
 INDIA_RAMP = ["#f7fbff", "#c6dbef", "#6baed6", "#429c40", "#fee08b",
@@ -452,7 +453,7 @@ def rainfall_field_map(grid_results, bbox, out_path="output/rainfall_field.png",
         lat = r.get("lat"); lon = r.get("lon"); h = r.get("hourly")
         if lat is None or lon is None or not h or "precipitation" not in h:
             continue
-        arr = [x for x in (h.get("precipitation") or [])[:24] if x is not None]
+        arr = [x for x in (h.get("precipitation") or [])[current_hour_offset():current_hour_offset() + 24] if x is not None]
         if not arr:
             continue
         coords.append((lat, lon)); vals.append(float(max(arr)))
@@ -652,7 +653,7 @@ def mmr_zoom_map(mmr_results, bbox, out_path="output/mmr_zoom.png",
         lat = r.get("lat"); lon = r.get("lon"); h = r.get("hourly")
         if lat is None or lon is None or not h or "precipitation" not in h:
             continue
-        arr = [x for x in (h.get("precipitation") or [])[:24] if x is not None]
+        arr = [x for x in (h.get("precipitation") or [])[current_hour_offset():current_hour_offset() + 24] if x is not None]
         if not arr:
             continue
         coords.append((lat, lon)); vals.append(float(max(arr)))
@@ -841,8 +842,18 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
     from matplotlib.patches import Patch
     by_base = {os.path.basename(p): p for p in grid_maps}
 
-    def _place(ax, base_name, title):
+    def _place(ax, base_name, title, fallback=None, fallback_title=None):
+        """Embed `base_name` in the panel, else `fallback`, else a placeholder.
+
+        The grid panels only exist when the heavy grid stage ran. Falling back
+        to the always-rendered point maps keeps the composite informative under
+        the LIGHT-payload gate instead of shipping an all-placeholder image.
+        """
         p = by_base.get(base_name)
+        used_title = title
+        if (not p or not os.path.exists(p)) and fallback:
+            p = by_base.get(fallback)
+            used_title = fallback_title or title
         if not p or not os.path.exists(p):
             ax.text(0.5, 0.5, "DATA UNAVAILABLE\nNo source data for this panel",
                     ha="center", va="center", fontsize=10, color="#333333")
@@ -850,16 +861,26 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
             ax.axis("off")
             return False
         img = mpimg.imread(p)
-        ax.imshow(img); ax.set_title(title, fontsize=10); ax.axis("off")
+        ax.imshow(img); ax.set_title(used_title, fontsize=10); ax.axis("off")
         return True
 
     outs = []
     # ---- Image 1: state synoptic 2x2 ----
+    # Each panel prefers the GRID panel (interpolated field) and falls back to
+    # the POINT map that is always rendered. Under the LIGHT-payload gate the
+    # grid panels are never produced, so without these fallbacks every panel
+    # would render as DATA UNAVAILABLE and we'd attach a blank image.
+    # Fallbacks are deliberately DIFFERENT variables so the brief stays readable:
+    # duplicating one map across two slots looks broken even though it is honest.
     fig1, axes1 = plt.subplots(2, 2, figsize=(13, 11), dpi=140)
-    _place(axes1[0, 0], "rainfall_field.png", "24h Rainfall Field (IMD bands)")
-    _place(axes1[0, 1], "timing_map.png", "Peak-Rainfall Timing (hour-of-day)")
-    _place(axes1[1, 0], "convective_map.png", "Convective Field (CAPE, 2500 J/kg line)")
-    _place(axes1[1, 1], "severe_field.png", "Synoptic MSLP (hPa)")
+    _place(axes1[0, 0], "rainfall_field.png", "24h Rainfall Field (IMD bands)",
+           fallback="rainfall_map.png", fallback_title="24h Rainfall (point model)")
+    _place(axes1[0, 1], "timing_map.png", "Peak-Rainfall Timing (hour-of-day)",
+           fallback="wind850_map.png", fallback_title="850hPa Wind (point model)")
+    _place(axes1[1, 0], "convective_map.png", "Convective Field (CAPE, 2500 J/kg line)",
+           fallback="nowcast_map.png", fallback_title="IMD District Nowcast (3h)")
+    _place(axes1[1, 1], "severe_field.png", "Synoptic MSLP (hPa)",
+           fallback="severe_map.png", fallback_title="Severe-system outlook (3-7d)")
     fig1.suptitle("MAHARASHTRA STATE SYNOPTIC BRIEF", fontsize=13, fontweight="bold")
     fig1.tight_layout(pad=3.0)
     if issued_ist:
@@ -877,23 +898,33 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
     # panel cycles through radar frames for live observed reflectivity.
     p_mmr = by_base.get("mmr_zoom.png")
     if not p_mmr or not os.path.exists(p_mmr):
-        print("[!] mmr_zoom.png missing; creating placeholder MMR asset brief")
-        # Preserve the 2-image contract: still emit a second image.
-        fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
-        axes2[0].text(0.5, 0.5, "DATA UNAVAILABLE\nMMR zoom source data missing",
-                      ha="center", va="center", fontsize=11, color="#333333")
-        axes2[0].set_title("Mumbai Metro Region 0.1deg Zoom (+ outfalls)\n(unavailable)", fontsize=10)
-        axes2[0].axis("off")
-        axes2[1].text(0.5, 0.5, "DATA UNAVAILABLE\nRadar source data missing",
-                      ha="center", va="center", fontsize=11, color="#333333")
-        axes2[1].set_title("IMD Doppler Radar Mosaic (observed reflectivity)\n(unavailable)", fontsize=10)
-        axes2[1].axis("off")
-        fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
-        fig2.tight_layout(pad=3.0)
-        p2 = os.path.join(out_dir, "mmr_asset_brief.gif")
-        fig2.savefig(p2, bbox_inches="tight"); plt.close(fig2)
-        outs.append(p2)
-        return outs
+        # The 0.1deg MMR zoom is a GRID product, so it is absent under the
+        # LIGHT-payload gate. Fall back to the always-rendered nowcast point map
+        # so this brief still shows real observed/advisory data instead of two
+        # placeholder panels. Only if BOTH are missing do we emit placeholders.
+        _mmr_fallback = by_base.get("nowcast_map.png")
+        if _mmr_fallback and os.path.exists(_mmr_fallback):
+            print("[*] mmr_zoom.png absent (LIGHT payload); using nowcast point map "
+                  "for the MMR brief")
+            p_mmr = _mmr_fallback
+        else:
+            print("[!] mmr_zoom.png missing; creating placeholder MMR asset brief")
+            # Preserve the 2-image contract: still emit a second image.
+            fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
+            axes2[0].text(0.5, 0.5, "DATA UNAVAILABLE\nMMR zoom source data missing",
+                          ha="center", va="center", fontsize=11, color="#333333")
+            axes2[0].set_title("Mumbai Metro Region 0.1deg Zoom (+ outfalls)\n(unavailable)", fontsize=10)
+            axes2[0].axis("off")
+            axes2[1].text(0.5, 0.5, "DATA UNAVAILABLE\nRadar source data missing",
+                          ha="center", va="center", fontsize=11, color="#333333")
+            axes2[1].set_title("IMD Doppler Radar Mosaic (observed reflectivity)\n(unavailable)", fontsize=10)
+            axes2[1].axis("off")
+            fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
+            fig2.tight_layout(pad=3.0)
+            p2 = os.path.join(out_dir, "mmr_asset_brief.gif")
+            fig2.savefig(p2, bbox_inches="tight"); plt.close(fig2)
+            outs.append(p2)
+            return outs
 
     _frames_dir = os.path.join(out_dir, "_anim_tmp")
     os.makedirs(_frames_dir, exist_ok=True)

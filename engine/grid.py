@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import time as _time
 import requests
+from engine.fetch_openmeteo import current_hour_offset
 
 # Pull in the shared polite gate so grid + city + basin calls never thunder-herd.
 try:
@@ -225,7 +226,7 @@ def grid_antecedent(grid_results, window=24):
         lat = r.get("lat"); lon = r.get("lon"); h = r.get("hourly")
         if lat is None or lon is None or not h or "soil_moisture_0_to_10cm" not in h:
             continue
-        arr = [x for x in (h.get("soil_moisture_0_to_10cm") or [])[:window] if x is not None]
+        arr = [x for x in (h.get("soil_moisture_0_to_10cm") or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
         if not arr:
             continue
         coords.append((lat, lon))
@@ -242,8 +243,8 @@ def grid_convective(grid_results, window=24):
         lat = r.get("lat"); lon = r.get("lon"); h = r.get("hourly")
         if lat is None or lon is None or not h:
             continue
-        cape = [x for x in (h.get("cape") or [])[:window] if x is not None]
-        li = [x for x in (h.get("lifted_index") or [])[:window] if x is not None]
+        cape = [x for x in (h.get("cape") or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
+        li = [x for x in (h.get("lifted_index") or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
         if not cape or not li:
             continue
         max_cape = float(max(cape))

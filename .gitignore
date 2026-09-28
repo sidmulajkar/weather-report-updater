@@ -12,6 +12,17 @@ venv*/
 output/
 *.log
 
+# Runtime state — MUST NOT be committed.
+# These are per-machine artefacts. The GitHub Actions workflow restores both
+# via actions/cache, so a committed copy would be restored OVER a warmer one
+# and could roll back forecast-vs-observed verification history.
+# (An earlier version of production_pipeline.yml asserted "*.db is gitignored"
+# — that was not actually true; this section is what makes it true.)
+*.db
+cache/
+radar_frames/
+_anim_tmp/
+
 # IDE
 .vscode/
 .idea/

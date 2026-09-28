@@ -12,6 +12,7 @@ Future hooks (NOT executed, no data source wired yet):
 
 import math
 import numpy as np
+from engine.fetch_openmeteo import current_hour_offset
 
 # Published convective criteria (operational meteorology, not invented):
 #   CAPE >= 2500 J/kg  AND  lifted_index <= -3 C  => elevated convection.
@@ -114,7 +115,7 @@ def peak_intensity_grid(grid_results, var="precipitation", window=24):
         h = r.get("hourly")
         if not h or var not in h:
             continue
-        arr = [x for x in (h[var] or [])[:window] if x is not None]
+        arr = [x for x in (h[var] or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
         if arr:
             mx = max(mx, max(arr))
     return round(mx, 1)
@@ -191,7 +192,7 @@ def peak_hour_field(grid_results, var="precipitation", window=24):
         h = r.get("hourly")
         if not h or var not in h:
             continue
-        arr = [x for x in (h[var] or [])[:window]]
+        arr = [x for x in (h[var] or [])[current_hour_offset():current_hour_offset() + window]]
         if not arr or all(x is None for x in arr):
             continue
         best_i, best_v = 0, -1.0
@@ -222,7 +223,7 @@ def antecedent_states(grid_results, window=24):
         if not arr:
             continue
         available = True
-        seq = [x if x is not None else 0.0 for x in arr[:window]]
+        seq = [x if x is not None else 0.0 for x in arr[current_hour_offset():current_hour_offset() + window]]
         if not seq:
             continue
         wet = max(seq)
@@ -258,7 +259,7 @@ def regional_rollup(grid_results, var="precipitation", window=24):
         h = r.get("hourly")
         if not h or var not in h:
             continue
-        arr = [x for x in (h[var] or [])[:window] if x is not None]
+        arr = [x for x in (h[var] or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
         if not arr:
             continue
         reg = assign_region(r["lat"], r["lon"])

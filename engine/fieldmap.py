@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
+from engine.fetch_openmeteo import current_hour_offset
 
 # IMD official 24h rainfall threshold bands (mm).
 IMD_THRESHOLDS = [0.0, 64.5, 115.5, 204.5, 1e9]
@@ -114,7 +115,7 @@ def peak_hour_and_field(grid_results, var="precipitation", window=24):
         h = r.get("hourly")
         if lat is None or lon is None or not h or var not in h:
             continue
-        arr = [x for x in (h[var] or [])[:window] if x is not None]
+        arr = [x for x in (h[var] or [])[current_hour_offset():current_hour_offset() + window] if x is not None]
         if not arr:
             continue
         coords.append((lat, lon)); vals.append(float(max(arr)))

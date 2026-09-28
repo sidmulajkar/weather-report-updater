@@ -80,6 +80,20 @@ def main():
     # All degrade gracefully to "unavailable" — never fake, never raise.
     MH_DISTRICTS = {l.get("district", l["name"]).upper() for l in locs}
     MH_BBOX = (72.0, 15.0, 81.0, 23.0)  # Maharashtra + surrounds
+    # Primary severity source: IMD's own RENDERED warning map, one small tile
+    # per monitored district, read concurrently. Palette-validated; a failed or
+    # off-palette tile yields no severity for that district (never a guess).
+    imd_wms = {}
+    try:
+        imd_wms = fetch_imd.wms_warning_colours(locs)
+        _ok = sum(1 for v in imd_wms.values() if v.get("ok"))
+        print(f"[*] IMD WMS rendered warnings: {_ok}/{len(imd_wms)} districts read "
+              f"(primary severity source)")
+        for _d, _v in sorted(imd_wms.items()):
+            if not _v.get("ok"):
+                print(f"[!] WMS read failed: {_d} -> {_v.get('reason')}")
+    except Exception as e:
+        print(f"[!] IMD WMS warning read unavailable: {type(e).__name__}: {e}")
     try:
         imd_warn = fetch_imd.district_warnings(MH_DISTRICTS)
         imd_now = fetch_imd.district_nowcast(MH_DISTRICTS)
@@ -118,6 +132,42 @@ def main():
               f"| AWS obs: {imd_obs.get('status')} ({imd_obs.get('count','?')} stns) "
               f"| imagery: {[k for k,v in imd_img.items() if v]} "
               f"| district polygons: {imd_geo.get('status')}")
+        # Relative lag of the WFS register, LOG ONLY. Anchored to the newest
+        # monitored row, never to wall-clock time, so neither a skewed local
+        # clock nor a UTC runner can manufacture a false staleness signal.
+        # Never gates severity and never reaches the briefing.
+        imd_lag = fetch_imd.relative_lag_minutes(
+            {k: v.get("updated_at") for k, v in
+             (imd_warn.get("warnings") or {}).items()})
+        if imd_lag:
+            _worst = max(imd_lag.items(), key=lambda kv: kv[1])
+            print(f"[*] WFS register relative lag: max {_worst[1]:.0f}m "
+                  f"({_worst[0]}) vs newest monitored row — diagnostic only")
+        # CANARY (log only, never a second severity): does the WFS attribute
+        # agree with the rendered map we now trust? Divergence is an upstream
+        # IMD signal, reported ONCE per run rather than per district.
+        _canary = []
+        for _d, _v in (imd_wms or {}).items():
+            if not _v.get("ok"):
+                continue
+            _wd = (imd_warn.get("warnings") or {}).get(_d) or {}
+            _attr = _wd.get("color_label")
+            if _attr and _attr != _v.get("label"):
+                _canary.append(f"{_d}: wfs={_attr} wms={_v.get('label')}")
+        if _canary:
+            print(f"[!] INFRASTRUCTURE CANARY: IMD WFS attribute disagrees with "
+                  f"IMD rendered map on {len(_canary)}/{len(imd_wms or {})} districts "
+                  f"(severity taken from the rendered map)")
+            for _c in _canary:
+                print(f"      {_c}")
+        elif imd_wms:
+            # Alignment shift. Today the WFS attribute disagrees on every
+            # monitored district; if that ever stops happening, IMD has changed
+            # its ETL behaviour and we want that visible rather than silent.
+            print("[*] INFRASTRUCTURE NOTICE: Upstream alignment shift detected — "
+                  "IMD WFS attribute now AGREES with the rendered map. The "
+                  "vector ETL behaviour has changed; re-verify the primary "
+                  "severity source before trusting the WMS path exclusively.")
     except Exception as e:
         imd_warn = {"status": "unavailable", "reason": str(e)}
         imd_now = {"status": "unavailable"}
@@ -125,6 +175,7 @@ def main():
         imd_img = {}
         imd_geo = {"status": "unavailable"}
         imd_radar_frames = []
+        imd_lag = {}
         print(f"[!] IMD authoritative fetch failed (non-fatal): {e}")
 
 
@@ -186,23 +237,23 @@ def main():
             acc = fstats["mean"]
             probs = []
             for h in pf.models.values():
-                pp = [x for x in h.get("precipitation_probability", [])[:window] if x is not None]
+                pp = om.window_from_now(h, "precipitation_probability", window)
                 if pp: probs.append(max(pp))
             prob = max(probs) if probs else 0
             first = next(iter(pf.models.values()))
-            wseg = [x for x in first.get("wind_speed_10m", [])[:window] if x is not None]
+            wseg = om.window_from_now(first, "wind_speed_10m", window)
             w10 = round(sum(wseg) / len(wseg) * 1.0, 1) if wseg else 0.0
-            dseg = [x for x in first.get("wind_direction_10m", [])[:window] if x is not None]
+            dseg = om.window_from_now(first, "wind_direction_10m", window)
             wdir = round(sum(dseg) / len(dseg), 1) if dseg else 0.0
             w850d = om.fusion_stats(om.model_850hpa_wind(pf, window), weights=om.ENSEMBLE_WEIGHTS)["mean"]
             d850 = []
             for h in pf.models.values():
-                dd = [x for x in h.get("wind_direction_850hPa", [])[:window] if x is not None]
+                dd = om.window_from_now(h, "wind_direction_850hPa", window)
                 if dd: d850.append(sum(dd) / len(dd))
             w850dir = round(sum(d850) / len(d850), 1) if d850 else None
             cape = om.fusion_stats(om.model_cape(pf, window), weights=om.ENSEMBLE_WEIGHTS)["mean"]
             gust = om.fusion_stats(om.model_wind_gust(pf, window), weights=om.ENSEMBLE_WEIGHTS)["mean"]
-            hourly_precip = [x for x in first.get("precipitation", [])[:window] if x is not None]
+            hourly_precip = om.window_from_now(first, "precipitation", window)
 
         # --- Convective proxy gate: radiosonde fallback when CAPE is missing ---
         convective_flag = None
@@ -226,24 +277,35 @@ def main():
         # --- U2 IMD nowcast for this district ---
         district_u = loc.get("district", name).upper()
         nc = fetch_imd_nowcast.nowcast_for_district(nc_all, loc.get("district", name))
-        # Prefer AUTHORITATIVE IMD district rainfall WARNING colour (district_warnings_india)
-        # over the nowcast text colour. Both are IMD; the warning layer is the
-        # official colour-coded severity. Graceful if unavailable.
+        # SEVERITY SOURCE (2026-09-28): the WMS RENDERED map, not the WFS
+        # attribute. Proven to disagree on 10/10 monitored districts while
+        # agreeing with IMD's published text bulletins 3/3. Every read is
+        # palette-validated; a failed or off-palette read yields NO severity
+        # rather than a guess. The WFS attribute is retained only as a canary.
         imd_colour = None
         imd_code = None
-        if imd_warn.get("status") == "ok":
-            wd = imd_warn.get("warnings", {}).get(district_u)
-            if wd and wd.get("color_label"):
-                imd_colour = wd["color_label"]
-                imd_code = wd.get("color_code")
+        imd_source = None
+        _wms = (imd_wms or {}).get(district_u) or {}
+        if _wms.get("ok"):
+            imd_colour = _wms.get("label")
+            imd_code = _wms.get("code")
+            imd_source = f"wms-{_wms.get('confidence')}"
         if not imd_colour:
-            imd_colour = nc.get("color_label") if nc.get("found") else None
-            imd_code = nc.get("color") if nc.get("found") else None
+            imd_status_note = "telemetry-degraded"
+        else:
+            imd_status_note = "ok"
         imd_status = nc.get("status", "unavailable")
+        _d_up = (loc.get("district") or name).upper()
         imd_payload = {"colour": imd_colour, "color_code": imd_code,
                        "status": "ok" if imd_colour else imd_status,
-                       "cats": (nc.get("cats") if nc.get("found") else None),
-                       "message": nc.get("message", ""), "color": nc.get("color")}
+                       "nowcast_colour": nc.get("color_label") if nc.get("found") else None,
+                       "message": nc.get("message", ""), "color": nc.get("color"),
+                       "source": imd_source, "degraded": not imd_colour,
+                       "rel_lag_min": imd_lag.get(_d_up),
+                       # Canary: does the WFS attribute agree with the rendered
+                       # map? Disagreement is an upstream IMD signal, logged once
+                       # per run, never shown as a second severity.
+                       "wfs_attr": (imd_warn.get("warnings", {}).get(_d_up) or {}).get("color_label")}
 
         # --- Step 2: Intensity-Duration (IDF) burst analysis from hourly series ---
         inten = intensity.analyze(hourly_precip, window) if hourly_precip else {}
@@ -358,7 +420,8 @@ def main():
         arr = om.precip_only(nlat, nlon, "ecmwf_ifs", cfg.get("forecast_days", 2))
         if not arr:
             return None
-        arr = [x for x in arr[:24] if x is not None]
+        _s = om.current_hour_offset()
+        arr = [x for x in arr[_s:_s + 24] if x is not None]
         if not arr:
             return None
         return {"name": f"({nlat},{nlon})",
@@ -455,6 +518,42 @@ def main():
                             issued_ist=today, sources="Open-Meteo multi-model fusion")
     print(f"[*] maps -> {p_rain}, {p_wind}, {p_w850}, {p_nc}, {p_sev}")
 
+    # ── Lane 1: Source weighting + payload gating ──────────────────────────────
+    # Compute risk_profile BEFORE heavy maps so we can gate the ~60s grid/choro
+    # on payload. AMBER_CONFLICT (Red 24h vs Green 3h) = LIGHT, so we skip maps
+    # that would only be used for a SEVERE escalation that isn't warranted.
+    nc_max, nc_avail, _nc_miss = report._pick_horizons(results)
+    # worst-case 24h outlook: worst IMD colour across all cities
+    _imax = 0
+    outlook_24h = 'Green'
+    for _r in results:
+        _c = (_r.get('imd') or {}).get('colour') or 'Green'
+        _w = report.ALERT_WEIGHTS.get(_c, 0)
+        if _w > _imax:
+            _imax = _w
+            outlook_24h = _c
+    outlook_24h = report._weight_to_colour(_imax) if _imax > 0 else 'Green'
+
+    # A 3h nowcast that is UNAVAILABLE must never be silently coerced to 'Green'.
+    # Doing so makes "feed broke" byte-identical to "IMD says calm", which fails
+    # toward reassurance during a live event. Only a genuine all-Green reading
+    # (districts present, colour resolved) yields 'Green'.
+    if nc_avail > 0 and nc_max == 0:
+        nowcast_3h = 'Green'
+        _nc_note = 'ok'
+    elif nc_avail > 0:
+        nowcast_3h = report._weight_to_colour(nc_max)
+        _nc_note = 'ok'
+    else:
+        nowcast_3h = None            # -> INDETERMINATE / blindspot, NOT Green
+        _nc_note = 'unavailable'
+    print(f"[*] 3h nowcast: {nowcast_3h!r} (avail={nc_avail} miss={_nc_miss} note={_nc_note})")
+    risk_profile = report.OperationalRiskEngine.evaluate(outlook_24h, nowcast_3h)
+    print(f"[*] risk_profile: {risk_profile['status']} | payload={risk_profile['payload']} "
+          f"| {risk_profile['strategic']}/{risk_profile['tactical']}")
+    _severe_mode = (risk_profile['payload'] == 'HEAVY')
+    print(f"[*] severe_mode (from risk_profile): {_severe_mode}")
+
     # ---- Phase 1+2: state-wide grid field + MMR zoom (model-interpolated) ----
     # ---- Phase 1+2: state-wide grid field + MMR zoom (model-interpolated) ----
     # Fetched in chunked batches (<=50 pts/call) sharing the rate limiter, with
@@ -463,24 +562,28 @@ def main():
     # instead of killing the whole grid/insight block.
     analysis = None
     grid_maps = []
-    try:
-        from engine import grid as grid_mod
-        from engine import analysis as analysis_mod
-        from engine import fieldmap as fieldmap_mod
-        import numpy as np
-        MH_BBOX = grid_mod.MH_BBOX
-        MMR_BBOX = grid_mod.MMR_BBOX
-        GRID_MODEL = "ecmwf_ifs"      # precip / field / storm-track source
-        CONV_MODEL = "gfs_seamless"   # only GFS carries lifted_index for convective flag
-        state_coords = grid_mod.maharashtra_grid(0.5)
-        mmr_coords = grid_mod.mmr_grid(0.1)
-        print(f"[*] grid: MH {len(state_coords)} + MMR {len(mmr_coords)} nodes "
+    if not _severe_mode:
+        print("[*] map gating: LIGHT payload — skipping grid analysis + field maps (~60s saved)")
+        # Mark WHY the grid is absent so the report can say "deliberately omitted"
+        # instead of falsely claiming an API timeout.
+        analysis = {"grid_ok": False, "grid_skipped": True}
+    else:
+        try:
+            from engine import grid as grid_mod
+            from engine import analysis as analysis_mod
+            from engine import fieldmap as fieldmap_mod
+            import numpy as np
+            MH_BBOX = grid_mod.MH_BBOX
+            MMR_BBOX = grid_mod.MMR_BBOX
+            GRID_MODEL = "ecmwf_ifs"      # precip / field / storm-track source
+            CONV_MODEL = "gfs_seamless"   # only GFS carries lifted_index for convective flag
+            state_coords = grid_mod.maharashtra_grid(0.5)
+            mmr_coords = grid_mod.mmr_grid(0.1)
+            print(f"[*] grid: MH {len(state_coords)} + MMR {len(mmr_coords)} nodes "
               f"(chunked fetch, model={GRID_MODEL})")
-        # analysis dict is always defined so summarize() never hits a NameError;
-        # grid_ok flags whether the grid layer actually produced data.
-        analysis = {"grid_ok": False}
-        state_res = mmr_res = conv_res = None
-
+        except Exception as _e:
+            print(f"[!] grid init failed: {_e}")
+            analysis = {"grid_ok": False}
         # ---- DAILY CACHE: reuse a TTL-fresh grid fetch (default 6h) so we
         # don't re-hit Open-Meteo's anonymous daily cap on every run. ----
         cached = fcache.load()
@@ -638,7 +741,8 @@ def main():
                         for r in conv_res:
                             h = r.get("hourly")
                             if h and h.get("cape"):
-                                arr = [x for x in h["cape"][:24] if x is not None]
+                                _cs = om.current_hour_offset()
+                                arr = [x for x in h["cape"][_cs:_cs + 24] if x is not None]
                                 if arr:
                                     ccoords.append((r["lat"], r["lon"]))
                                     ccape.append(max(arr))
@@ -653,11 +757,6 @@ def main():
         else:
             print("[!] state grid insufficient (<3 good points); skipping field/analysis")
         print(f"[*] field maps -> {grid_maps}")
-    except Exception as e:
-        print(f"[!] grid setup failed (non-fatal): {e}")
-        grid_maps = grid_maps or []
-
-
     # ── IMD district choropleth (authoritative warning polygons) ──
     p_district = None
     if imd_geo.get("status") == "ok" and imd_geo.get("warnings"):
@@ -678,7 +777,8 @@ def main():
     text = report.compose(results, cfg.get("region_focus", "Maharashtra"),
                           narrative=narr, skill=skill, bias_mm=bias_mm,
                           observed_status=obs_all["status"], nowcast_status=nc_all["status"],
-                          run_date=today, severe=sev, radar_status=radar_status)
+                          run_date=today, severe=sev, radar_status=radar_status,
+                          risk_profile=risk_profile)
     with open(os.path.join(OUT, "report.md"), "w") as f:
         f.write(text + "\n")
     print(f"[*] report saved -> {os.path.join(OUT, 'report.md')}")
@@ -686,7 +786,9 @@ def main():
     # deliver — concise one-paragraph summary as the chat text (Telegram's
     # 4096-char limit rejects the full report; full report stays in report.md).
     summary = report.summarize(results, cfg.get("region_focus", "Maharashtra"),
-                                today, sev, radar_status, analysis=analysis)
+                                today, sev, radar_status,
+                                analysis=analysis if analysis else {},
+                                risk_profile=risk_profile)
     summary = _fold_long_text(summary, limit=4096)
     print(f"[*] telegram text length: {len(summary)} chars (limit 4096)")
 
@@ -696,37 +798,24 @@ def main():
     #          so operators get the glanceable per-district + basin alerts when
     #          the situation is genuinely severe / extreme (not just monsoon).
     # Trigger uses ONLY data we already computed — no extra API calls.
-    def _severe_mode(results, analysis, sev):
-        for r in results:
-            rk = r.get("risk")
-            lvl = getattr(rk, "level", None)
-            if lvl in ("WARNING", "CRITICAL"):
-                return True
-            imd = r.get("imd") or {}
-            if imd.get("colour") in ("Orange", "Red"):
-                return True
-        if analysis:
-            if analysis.get("stall"):
-                return True
-            if (analysis.get("peak_intensity_mm_h") or 0) >= 20:
-                return True
-            for reg in (analysis.get("regions") or {}).values():
-                cn = reg.get("clustered_node")
-                if cn and (cn.get("max_mm") or 0) >= 115.5:
-                    return True
-        if sev and (sev.get("alerts") or sev.get("has_signal")):
-            return True
-        return False
-
-    severe_mode = _severe_mode(results, analysis, sev)
-    print(f"[*] delivery mode: {'SEVERE (Option C)' if severe_mode else 'NORMAL (Option A)'}")
+    # severe_mode already computed at line 468 from risk_profile payload.
+    # Lane 1 gating — not a per-city heuristic; do not re-evaluate from city data.
+    delivery_severe = _severe_mode
+    # Exported so the local harness can verify against the REAL gate instead of
+    # hardcoding True (which demanded SEVERE-only artefacts on a LIGHT cycle).
+    globals()['LAST_DELIVERY_SEVERE'] = bool(delivery_severe)
+    print(f"[*] delivery mode: {'SEVERE (Option C)' if delivery_severe else 'NORMAL (Option A)'}")
 
     # Composite generation — always create the visual briefs, but delivery is lean.
     composite_paths = []
     if grid_maps or os.path.exists(p_nc):
         _all_grid_maps = list(grid_maps)
-        if os.path.exists(p_nc) and p_nc not in _all_grid_maps:
-            _all_grid_maps.append(p_nc)
+        # The POINT maps are always rendered (cheap, from the per-city fetch).
+        # Hand them to the compositor so its panels can fall back to real imagery
+        # when the grid stage was skipped by the LIGHT-payload gate.
+        for _p in (p_nc, p_rain, p_wind, p_w850, p_sev):
+            if _p and os.path.exists(_p) and _p not in _all_grid_maps:
+                _all_grid_maps.append(_p)
         try:
             composite_paths = maps.compile_consolidated_visual_briefs(
                 OUT, _all_grid_maps, issued_ist=today, radar_frames=imd_radar_frames)
@@ -757,12 +846,48 @@ def main():
 
     _synoptic = os.path.join(OUT, "state_synoptic_brief.png")
 
+    def _has_real_pixels(path):
+        """True if the image is a real map, not an all-placeholder composite.
+
+        A placeholder panel is white with a few lines of dark text; a real map
+        carries a colorbar, station markers and/or a filled field. Mean/std are
+        NOT discriminative here (measured: placeholder mean ~252 AND sparse real
+        maps also ~247). The reliable signal is the INK FRACTION inside a
+        centre crop (cropping away the white margin so a sparse but genuine
+        station map isn't diluted by paper).
+
+        Measured separation on this repo's real outputs:
+            placeholders (all DATA UNAVAILABLE) : 0.011 - 0.020
+            genuine maps (even sparse, no fill) : 0.048 - 0.888
+        Threshold 0.035 sits in the gap.
+        """
+        try:
+            from PIL import Image
+            import numpy as np
+            with Image.open(path) as im:
+                im = im.convert("L")
+                w, h = im.size
+                im = im.crop((int(w * 0.12), int(h * 0.12),
+                              int(w * 0.88), int(h * 0.88))).resize((96, 96))
+                a = np.asarray(im, dtype=float)
+            return float((a < 200.0).mean()) > 0.035
+        except Exception:
+            return True  # can't tell -> assume real, don't silently drop media
+
     def _safe_send_photo(path, caption):
         if path and os.path.exists(path):
+            if not _has_real_pixels(path):
+                print(f"[!] skipping blank composite (placeholder panels): "
+                      f"{os.path.basename(path)}")
+                return
             telegram.send_photo(CHAT, path, caption=caption, dry_run=DRY)
 
     def _safe_send_video(path, caption):
         if path and os.path.exists(path):
+            if not _has_real_pixels(path):
+                print(f"[!] skipping blank animation (placeholder panels): "
+                      f"{os.path.basename(path)}")
+                return
             telegram.send_animation(CHAT, path, caption=caption, dry_run=DRY, supports_streaming=True)
 
     # Frame 0: synoptic brief
@@ -771,7 +896,7 @@ def main():
     if _mmr_video:
         _safe_send_video(_mmr_video, "MMR/asset animated brief")
 
-    if severe_mode:
+    if delivery_severe:
         # Severe escalation: nowcast + severe-system outlook + district choropleth + timing map
         _safe_send_photo(p_nc, "IMD district nowcast (next 3h)")
         _safe_send_photo(p_sev, "Severe-system outlook (3-7d, AS+BoB)")
@@ -781,11 +906,11 @@ def main():
         p_timing = os.path.join(OUT, "timing_map.png")
         if os.path.exists(p_timing):
             _safe_send_photo(p_timing, "Peak rainfall timing map")
-    _verify_outputs(OUT, severe_mode, DRY)
+    _verify_outputs(OUT, delivery_severe, DRY)
     print("[*] done.")
 
 
-def _verify_outputs(OUT, severe_mode, DRY):
+def _verify_outputs(OUT, delivery_severe, DRY):
     """Fail loudly in CI if expected deliverables are missing, blank, or all-white."""
     required = [
         os.path.join(OUT, "report.md"),
@@ -800,7 +925,7 @@ def _verify_outputs(OUT, severe_mode, DRY):
     else:
         required.append(mmr_mp4)
 
-    if severe_mode:
+    if delivery_severe:
         required += [
             os.path.join(OUT, "nowcast_map.png"),
             os.path.join(OUT, "severe_map.png"),

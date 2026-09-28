@@ -10,6 +10,7 @@ and combine. This module:
 Free, keyless. ~10k req/day. Non-commercial on free tier (see research notes).
 """
 from __future__ import annotations
+import datetime as _dt
 import requests
 from dataclasses import dataclass, field
 from typing import Optional
@@ -142,8 +143,28 @@ def fetch_location(loc: dict, models: list[str], forecast_days: int = 2) -> Poin
     return pf
 
 
+def current_hour_offset(tz: str = "Asia/Kolkata") -> int:
+    """Index of the CURRENT hour inside an Open-Meteo hourly series.
+
+    Open-Meteo (no `past_days`) returns `time` as a naive LOCAL-time array
+    beginning at 00:00 of the current day, so "now" sits at index == local hour.
+    Slicing [:24] from index 0 therefore counts hours that have ALREADY PASSED
+    as forecast — which deflates every 24h accumulation and makes the model
+    look benign next to a live IMD warning. Always slice from here instead.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo(tz)).hour
+    except Exception:
+        return 0
+
+
 def accumulate_next_n_hours(hourly: dict, var: str, n: int, start_idx: int = 0) -> float:
-    """Sum `var` over the next n hourly slots from start_idx (default now)."""
+    """Sum `var` over n hourly slots starting at start_idx.
+
+    Pass start_idx=current_hour_offset() to anchor the window at NOW rather
+    than at 00:00 local.
+    """
     arr = hourly.get(var, [])
     if not arr:
         return 0.0
@@ -151,11 +172,22 @@ def accumulate_next_n_hours(hourly: dict, var: str, n: int, start_idx: int = 0) 
     return round(sum(seg), 2)
 
 
-def model_24h_precip(pf: PointForecast, n: int = 24) -> dict:
-    """Return model -> 24h accumulated precipitation (mm)."""
+def window_from_now(hourly: dict, var: str, n: int, tz: str = "Asia/Kolkata") -> list:
+    """The n values of `var` covering the window that starts at NOW."""
+    arr = hourly.get(var, [])
+    if not arr:
+        return []
+    s = current_hour_offset(tz)
+    return [x for x in arr[s:s + n] if x is not None]
+
+
+def model_24h_precip(pf: PointForecast, n: int = 24, start_idx: Optional[int] = None) -> dict:
+    """Return model -> n-hour accumulated precipitation (mm), anchored at NOW."""
+    if start_idx is None:
+        start_idx = current_hour_offset()
     out = {}
     for m, h in pf.models.items():
-        out[m] = accumulate_next_n_hours(h, "precipitation", n)
+        out[m] = accumulate_next_n_hours(h, "precipitation", n, start_idx)
     return out
 
 
@@ -205,27 +237,36 @@ def mean_over_window(hourly: dict, var: str, n: int, start_idx: int = 0) -> floa
     return round(sum(seg) / len(seg), 1) if seg else 0.0
 
 
-def model_850hpa_wind(pf: PointForecast, n: int = 24) -> dict:
-    """model -> mean 850 hPa wind speed (km/h) over window."""
+def model_850hpa_wind(pf: PointForecast, n: int = 24,
+                       start_idx: Optional[int] = None) -> dict:
+    """model -> mean 850 hPa wind speed (km/h) over window FROM NOW."""
+    if start_idx is None:
+        start_idx = current_hour_offset()
     out = {}
     for m, h in pf.models.items():
-        out[m] = mean_over_window(h, "wind_speed_850hPa", n)
+        out[m] = mean_over_window(h, "wind_speed_850hPa", n, start_idx)
     return out
 
 
-def model_cape(pf: PointForecast, n: int = 24) -> dict:
-    """model -> mean CAPE (J/kg) over window."""
+def model_cape(pf: PointForecast, n: int = 24, start_idx: Optional[int] = None) -> dict:
+    """model -> mean CAPE (J/kg) over window FROM NOW."""
+    if start_idx is None:
+        start_idx = current_hour_offset()
     out = {}
     for m, h in pf.models.items():
-        out[m] = mean_over_window(h, "cape", n)
+        out[m] = mean_over_window(h, "cape", n, start_idx)
     return out
 
 
-def model_wind_gust(pf: PointForecast, n: int = 24) -> dict:
-    """model -> max 10m wind gust (km/h) over window."""
+def model_wind_gust(pf: PointForecast, n: int = 24,
+                    start_idx: Optional[int] = None) -> dict:
+    """model -> max 10m wind gust (km/h) over window FROM NOW."""
+    if start_idx is None:
+        start_idx = current_hour_offset()
     out = {}
     for m, h in pf.models.items():
-        arr = [x for x in h.get("wind_gusts_10m", [])[:n] if x is not None]
+        arr = [x for x in h.get("wind_gusts_10m", [])[start_idx:start_idx + n]
+               if x is not None]
         out[m] = round(max(arr), 1) if arr else 0.0
     return out
 

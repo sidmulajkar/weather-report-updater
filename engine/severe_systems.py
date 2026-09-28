@@ -224,6 +224,38 @@ def low_pressure_belt(grid_series: dict) -> list[dict]:
     return alerts
 
 
+def basin_min_mslp(grid_series: dict, hours: int = 72) -> dict:
+    """Per-basin MINIMUM MSLP over the actionable window (default day 0-3).
+
+    This is a MEASUREMENT, not a verdict. A 3-7 day outlook must be driven by
+    the near-term window, not by a day-9 excursion.
+
+    Why this exists: `build_outlook()` computed the basin grid, then returned
+    only {official, alerts, has_signal}. The map plotted the arrays and the text
+    read the verdict, so nothing ever reconciled the two and the briefing could
+    print "CLEAR" while the delivered map showed a sub-1006 hPa low in the BoB.
+    The measurement now travels with the verdict.
+    """
+    out = {}
+    for basin, series in (grid_series or {}).items():
+        if not series:
+            continue
+        best = None
+        for (la, lo), s in series.items():
+            p = s.get("pressure_msl") or []
+            for i in range(min(hours, len(p))):
+                if p[i] is None:
+                    continue
+                v = float(p[i])
+                if best is None or v < best[0]:
+                    best = (v, i, la, lo)
+        if best:
+            out[basin] = {"min_mslp": round(best[0], 1),
+                          "day": best[1] // 24,
+                          "lat": best[2], "lon": best[3]}
+    return out
+
+
 def build_outlook() -> dict:
     """Combine A (official) + B (model) into one outlook dict for the report."""
     imd = fetch_imd_genesis()
@@ -238,7 +270,7 @@ def build_outlook() -> dict:
             gs = {}
             # CONCURRENT (same fix as model_genesis_scan): was serial -> 7-min hang.
             with ThreadPoolExecutor(max_workers=min(len(grid), 7)) as ex:
-                fut_map = {ex.submit(_fetch_series, la, lo, 10): (la, lo) for (la, lo) in grid}
+                fut_map = {ex.submit(_fetch_series, la, lo, 10): (la, lo) for la, lo in grid}
                 for fut in fut_map:
                     la, lo = fut_map[fut]
                     s = fut.result()
@@ -253,7 +285,21 @@ def build_outlook() -> dict:
         "status": imd["status"], "watch": imd["watch"], "bands": imd["bands"],
         "text": (imd["text"][:600] if imd["status"] == "ok" else imd.get("reason", "")),
     }
+    # The measurement the map already plots, now available to the text layer.
+    basin_min = basin_min_mslp(grid_series)
+    # Hedged note: a sub-1006 hPa minimum in the actionable window is worth
+    # saying out loud, but on its own it is NOT a cyclonic precursor -- the BoB
+    # is climatologically low in the monsoon, so a bare threshold fires almost
+    # every day. Only `alerts` (which require a sustained closed low with
+    # 850 hPa vorticity corroboration over >=24h) support a severity statement.
+    # This field reports the number and explicitly withholds the verdict.
+    low_notes = []
+    for basin, m in (basin_min or {}).items():
+        if m["min_mslp"] < 1006.0:
+            low_notes.append(
+                f"{basin} low noted (min {m['min_mslp']:.1f} hPa, day {m['day']})")
     return {"official": official, "alerts": all_alerts,
+            "basin_min": basin_min, "low_notes": low_notes,
             "has_signal": bool(imd["watch"] or imd["bands"] or all_alerts)}
 
 

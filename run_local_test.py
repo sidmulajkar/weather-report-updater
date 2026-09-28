@@ -30,7 +30,11 @@ tg.send_animation = fake_anim
 
 t0 = time.time()
 rr.main()
-_verify_outputs(rr.BASE + '/output', True, True)
+# Pass the REAL delivery gate. This used to hardcode True, which made the
+# verifier demand SEVERE-mode artefacts (timing_map.png et al) on a LIGHT
+# cycle and print a spurious "missing deliverables" warning that the
+# production run never emits.
+_verify_outputs(rr.BASE + '/output', getattr(rr, 'LAST_DELIVERY_SEVERE', False), True)
 all_media = sent + [(f, c) for f, c, _ in sent_anim]
 print(f"\nTOTAL_RUNTIME={time.time()-t0:.1f}s  TEXT_LEN={len(cap.get('s',''))}  SENT={len(all_media)}")
 print("=" * 60)
