@@ -18,6 +18,11 @@ INDIA = timezone(timedelta(hours=5, minutes=30))  # Asia/Kolkata, stdlib only
 # Levels render as plain text (CRITICAL/WARNING/ADVISORY/NOMINAL).
 LEVEL_EMOJI = {"CRITICAL": "", "WARNING": "", "ADVISORY": "", "NOMINAL": ""}
 LEVEL_RANK = {"NOMINAL": 0, "ADVISORY": 1, "WARNING": 2, "CRITICAL": 3}
+
+# Consensus Conflict Matrix thresholds: a district's forecast max temperature that
+# exceeds this absolute value is a heat-risk signal when the model is dry but the
+# IMD GIS layer shows Yellow/Orange (see _prov_tag). Maharashtra, October.
+_P_THERMAL_ABSOLUTE_C = 35.0
 LEVEL_ACTION = {
     "CRITICAL": "Immediate halt of outdoor/height work; evacuate low-lying sites; reroute logistics.",
     "WARNING": "Secure assets; limit travel; pre-position pumps; watch the next update.",
@@ -156,7 +161,13 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
         prox_s = f"{prox.get('count')} neigh" if prox.get("flagged") else "clear"
         ant = r.get("antecedent_7d_mm", 0) or 0
         ant_s = f"{ant:.0f} mm ({r['risk'].antecedent_state})"
-        imd = r["imd"].get("colour") or r["imd"].get("color_label") or "n/a"
+        imd = r['imd'].get('colour') or r['imd'].get('color_label') or 'n/a'
+        _prov = (r.get("imd") or {}).get("prov") or {}
+        # Compose keeps the full matrix; mirror the chat's provenance tag so
+        # the brief never reads a hazard-agnostic GIS Yellow as rain when the
+        # model is dry and a thermal advisory is live.
+        if _prov.get("hazard_type") == "thermal-risk":
+            imd = f"{imd} [THERMAL-RISK]"
         lines.append(
             f"| {r['name']} | {LEVEL_EMOJI[rk.level]} {rk.level} | "
             f"{r.get('raw_mm',0):.1f}→{r.get('corrected_mm',0):.1f} mm | {burst} | {wind_h} | "
@@ -299,9 +310,16 @@ def compose(results: list[dict], region: str, narrative: dict = None, skill: dic
     # skill (honest calibration)
     if skill and skill.get("n_pairs"):
         cal = "calibrated" if skill.get("calibrated") else "indicative only"
-        lines.append(f"**Forecast skill** vs IMD observed (event ≥ {skill['threshold_mm']} mm/24h, "
-                     f"n={skill['n_pairs']}, {cal}): POD={skill['POD']}, FAR={skill['FAR']}, "
-                     f"CSI={skill['CSI']}, ETS={skill['ETS']}, BSS={skill['BSS']}.")
+        if skill.get("n_pairs", 0) < 30:
+            # metric denominators (POD/FAR/CSI/ETS/BSS) are not reliable below n=30
+            lines.append(f"**Forecast skill** vs IMD observed (event ≥ {skill['threshold_mm']} mm/24h, "
+                         f"n={skill['n_pairs']}, {cal}): "
+                         "[Validation Context: Insufficient data sample size to calculate statistical accuracy indices] "
+                         "(metric denominators stabilise at n >= 30).")
+        else:
+            lines.append(f"**Forecast skill** vs IMD observed (event ≥ {skill['threshold_mm']} mm/24h, "
+                         f"n={skill['n_pairs']}, {cal}): POD={skill['POD']}, FAR={skill['FAR']}, "
+                         f"CSI={skill['CSI']}, ETS={skill['ETS']}, BSS={skill['BSS']}.")
         if not skill.get("calibrated"):
             lines.append(f"  _Note: {skill.get('note')}._")
     else:
@@ -330,6 +348,23 @@ def _esc(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _prov_tag(imd_colour, corrected_mm, th_status, tmax_c):
+    """Hazard-agnostic GIS colour must never silently read as precipitation when
+    the model grid is dry and a thermal advisory is live. Returns the provenance
+    dict (hazard_type, risk_note) for the per-district payload."""
+    prov = {"hazard_type": "precipitation", "risk_note": None}
+    is_advisory = th_status == "ADVISORY" and tmax_c > 0
+    is_hot = tmax_c > _P_THERMAL_ABSOLUTE_C
+    if (str(imd_colour).lower() in ("yellow", "orange", "red")
+            and corrected_mm < 0.1 and (is_advisory or is_hot)):
+        prov["hazard_type"] = "thermal-risk"
+        note_parts = ["dry model + active thermal advisory => Yellow is heat-risk provenance"]
+        if is_hot and not is_advisory:
+            note_parts.append(f"max tmax {tmax_c}C exceeds threshold")
+        prov["risk_note"] = " | ".join(note_parts)
+    return prov
+
+
 def _html_summary(summary: str) -> str:
     """Minimal Telegram HTML post-processing: preserve structure, add safe bolding."""
     if not summary:
@@ -339,7 +374,7 @@ def _html_summary(summary: str) -> str:
         stripped = line.strip()
         if stripped.startswith("=" * 10) or stripped.startswith("-" * 10):
             lines.append(f"<pre>{_esc(stripped)}</pre>")
-        elif stripped.startswith("REGION") or stripped.startswith("ISSUED") or stripped.startswith("SOURCES") or stripped.startswith("SYSTEM STATUS"):
+        elif stripped.startswith("REGION") or stripped.startswith("ISSUED") or stripped.startswith("SOURCES") or stripped.startswith("SYSTEM STATUS") or stripped.startswith("SEASON") or stripped.startswith("VALID"):
             lines.append(f"<b>{_esc(stripped)}</b>")
         elif stripped in {"DISTRICT WARNINGS (24h):", "COASTAL ADVISORY (YELLOW):", "SYNOPTIC VALIDATION", "SYSTEMIC INSIGHT (model-derived, no invented physics)", "DIRECTIVE: Cross-verify with official IMD (mausam.imd.gov.in). Consolidated risk maps attached (state synoptic + MMR/asset). Unofficial analyst product."}:
             lines.append(f"<b>{_esc(stripped)}</b>")
@@ -427,6 +462,10 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
         lines.append(f"ISSUED (IST)   : {run_date}  |  VALIDITY : 24 H")
     lines.append(f"SOURCES        : IMD rendered warning map (WMS, palette-validated) "
                  f"+ Open-Meteo multi-model grid (model estimate)")
+    # Seasonal context: IMD withdrew the SW monsoon from Maharashtra on 08 Oct
+    # 2026, so a rainfall alert here is a post-monsoon coastal event, not
+    # monsoon rain. Stating it stops an October Yellow reading as unexplained.
+    lines.append("SEASON        : POST-MONSOON (SW monsoon withdrawn from Maharashtra 08 Oct 2026)")
     lines.append(f"SYSTEM STATUS  : {status}")
     lines.append("")
 
@@ -438,6 +477,139 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
     _horizon_conflict = (risk_profile and
                          risk_profile.get("strategic") == "STANDBY" and
                          risk_profile.get("tactical") == "MONITOR")
+    # ---- Dual-axis hazard matrix -------------------------------------------
+    # Precipitation and thermal are INDEPENDENT axes. IMD publishes heat and
+    # humidity advisories on the per-city forecast page, not on the district
+    # rainfall layer, so a district can be Rain:Green while a formal
+    # hot-and-humid advisory is in force. Collapsing them into one severity
+    # would tell an operator to expect rain when the actual hazard is heat --
+    # wrong planning for shipping, logistics and site safety.
+    # A NOT MONITORED thermal axis is a COVERAGE GAP and is printed as such. It
+    # is never omitted and never compressed into a default Green.
+    def _thermal_cell(r):
+        th = ((r.get("imd") or {}).get("hazards") or {}).get("thermal") or {}
+        st = (th.get("status") or "NOT MONITORED").upper()
+        if st == "ADVISORY":
+            desc = th.get("description") or "thermal advisory"
+            tmax = th.get("tmax_c")
+            rng = f" [{th.get('tmin_c')}-{tmax}C]" if tmax is not None else ""
+            return f"ADVISORY ({desc}){rng}"
+        if st == "NOMINAL":
+            # A live non-thermal IMD warning (fog, dust, haze) sits in the same
+            # cell. Calling that "Nominal" would read as "no warning" to a
+            # shipping operator, so name the actual hazard instead.
+            _desc = th.get("description") or "no warning"
+            if _desc.startswith("non-thermal warning on IMD feed:"):
+                _haz = _desc.split(":", 1)[1].strip()
+                return f"OTHER HAZARD: {_haz}"
+            return f"Nominal ({_desc})"
+        if st == "UNKNOWN":
+            # A verified station failed to answer this cycle. Say so explicitly:
+            # this is NOT the same as the district having no data source, and it
+            # must never be read as Nominal.
+            return "UNKNOWN (fetch failure - recheck vs IMD)"
+        return "NOT MONITORED (coverage gap)"
+
+    _matrix = []
+    _adv_lines = []
+    _rain_alert_names = []      # districts with a non-Green precipitation level
+    _thermal_unknown = []       # verified stations that failed to answer
+    _other_hazard_names = []    # live non-thermal IMD warnings (fog, dust, haze)
+    for r in (results or []):
+        # Telegram payload skips nominal all-clear rows (mobile-readability).
+        # report.md (compose) keeps them for the full briefing.
+        if r["risk"].level == "NOMINAL" and r.get("corrected_mm", 0.0) == 0.0:
+            continue
+        nm = (r.get("name") or "?").upper()
+        pr = ((r.get("imd") or {}).get("hazards") or {}).get("precipitation") or {}
+        rain = pr.get("level") or "unavailable"
+        # Precipitation severity also lives on the legacy top-level key; the
+        # nested block is authoritative but older result shapes still populate
+        # `colour`, so read both rather than trusting one.
+        if not pr.get("level"):
+            rain = ((r.get("imd") or {}).get("colour")) or "unavailable"
+        _prov = (r.get("imd") or {}).get("prov") or {}
+        if _prov.get("hazard_type") == "precipitation" and str(rain).lower() in ("yellow", "orange", "red"):
+            _rain_alert_names.append(nm)
+        _tag = ""
+        if _prov.get("hazard_type") == "thermal-risk":
+            _tag = " [THERMAL-RISK]"
+        _matrix.append(f"  {nm:11s} | {str(rain).upper():8s}{_tag}"
+                       + (f" [{_prov.get('risk_note')}]" if _prov.get("risk_note") else "")
+                       + f" | Thermal: {_thermal_cell(r)}")
+        th = ((r.get("imd") or {}).get("hazards") or {}).get("thermal") or {}
+        _tst = (th.get("status") or "").upper()
+        if _tst == "ADVISORY":
+            tmax = th.get("tmax_c")
+            _adv_lines.append(
+                f"  - {nm}: {th.get('description') or 'thermal advisory'}"
+                + (f" (max {tmax}C)" if tmax is not None else "")
+                + " — high thermal stress risk; hydrate/shade field crews at peak daylight.")
+        elif _tst == "UNKNOWN":
+            _thermal_unknown.append(nm)
+        # A live non-thermal warning (fog/dust/haze) is a real IMD signal even
+        # though it is neither thermal nor precipitation, so it must count
+        # toward the sign-off rather than being silently read as nominal.
+        elif _tst == "NOMINAL":
+            _d = th.get("description") or ""
+            if _d.startswith("non-thermal warning on IMD feed:"):
+                _other_hazard_names.append(f"{nm} ({_d.split(':', 1)[1].strip()})")
+    if _matrix:
+        lines.append("DISTRICT METEOROLOGICAL MATRIX — dual hazard axis:")
+        lines.append("  (Rain and Thermal are INDEPENDENT axes from separate IMD sources; "
+                     "a district can carry one alert and none of the other. "
+                     "NOT MONITORED = no verified IMD station for that district, "
+                     "i.e. a coverage gap — it is NOT a no-warning state.)")
+        lines.extend(_matrix)
+        if _adv_lines:
+            lines.append("")
+            lines.append("ACTIVE THERMAL ADVISORIES:")
+            lines.extend(_adv_lines)
+        # ── TEMPORAL: when does each hazard actually bite? ────────────────
+        # Two independent clocks, both already in the payload:
+        #   IMD nowcast validity (toi/vupto) — which 3 hours the colour covers.
+        #   Model peak hour              — when the hourly series maxes out.
+        # CHARACTER BUDGET MATTERS: the naive per-district rendering pushed the
+        # briefing to 3945/4096 chars, which tripped _fold_long_text and cut the
+        # OPERATIONAL PROTOCOLS footer off the end — i.e. the feature made the
+        # message worse. So the nowcast window is stated ONCE (IMD issues it
+        # statewide, not per district) and only districts with a MATERIAL signal
+        # get a line. The peak line is gated at 1mm: a 0.2mm "peak" is
+        # technically true and operationally meaningless, and printing it trains
+        # the reader to skip the line on the day it actually matters.
+        _PEAK_FLOOR_MM = 1.0
+        _windows, _material = set(), []
+        for r in (results or []):
+            nm = (r.get("name") or "?").upper()
+            imd = r.get("imd") or {}
+            win = imd.get("nowcast_window")
+            if win and win != "no validity window":
+                _windows.add(win)
+            peak_mm = r.get("peak_mm")
+            if peak_mm is not None and peak_mm >= _PEAK_FLOOR_MM:
+                _material.append(
+                    f"  {nm:11s} | model peak {peak_mm:.1f}mm"
+                    + (f" at {r.get('peak_at_ist')}" if r.get("peak_at_ist") else ""))
+        _tbits = []
+        if _windows:
+            # IMD publishes one statewide nowcast window, so list it once unless
+            # districts genuinely disagree (then list each variant).
+            _tbits.append("IMD nowcast valid "
+                          + "; ".join(sorted(_windows)) + ".")
+        if _material:
+            _tbits.append("Material model peaks (>="
+                          + f"{_PEAK_FLOOR_MM:.0f}mm) in "
+                          + f"{len(_material)} district(s):")
+            _tbits.extend(_material)
+        elif results:
+            _tbits.append("No district reaches a material model peak "
+                          f"(>= {_PEAK_FLOOR_MM:.0f}mm) this cycle.")
+        if _tbits:
+            lines.append("")
+            lines.append("TEMPORAL PROFILE — hazard timing:")
+            lines.extend(_tbits)
+        lines.append("")
+
     if real_alerts:
         lines.append("DISTRICT WARNINGS (24h):")
         for r in real_alerts:
@@ -513,11 +685,35 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
             lines.append(f"  Other assets ({len(other)}): NOMINAL / safe operational windows.")
         lines.append("")
 
-    # ---- Tier C: ultra-condensed all-clear ----
+    # ---- Tier C: sign-off, evaluated on BOTH axes independently ----
     else:
-        lines.append("No warning in force for monitored assets.")
-        lines.append("Logistics, shipping and outdoor operations remain unrestricted. "
-                     "Routine monitoring continues.")
+        # BUG FIXED HERE: the previous block keyed ONLY off thermal advisories, so
+        # any cycle with zero thermal advisories fell through to "No warning in
+        # force" while the matrix directly above printed five Rain:YELLOW
+        # districts. A briefing that contradicts itself is worse than one that is
+        # cautious, so each axis is now judged on its own evidence.
+        _has_rain = bool(_rain_alert_names)
+        _has_therm = bool(_adv_lines)
+        _notes = []
+        if _has_rain:
+            _notes.append(f"precipitation alerts ({', '.join(_rain_alert_names)})")
+        if _has_therm:
+            _notes.append("thermal advisory")
+        if _thermal_unknown:
+            _notes.append(f"thermal telemetry unknown for {', '.join(_thermal_unknown)}")
+        if _other_hazard_names:
+            _notes.append("non-thermal warning(s): " + "; ".join(_other_hazard_names))
+        if not _notes:
+            lines.append("No warning in force on either hazard axis for monitored assets.")
+            lines.append("Logistics, shipping and outdoor operations remain unrestricted. "
+                         "Routine monitoring continues.")
+        else:
+            lines.append(f"ACTIVE STATUS: {len(_notes)} hazard signal(s) - "
+                         + "; ".join(_notes) + ".")
+            lines.append("See the dual hazard matrix above for district-level detail. "
+                         "Rain restrictions apply only where a precipitation level is "
+                         "shown; heat precautions apply only where a thermal advisory "
+                         "is shown.")
         lines.append("")
 
     # ---- synoptic validation sub-block ----
@@ -547,7 +743,7 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
                      "below IMD depression threshold; verify vs IMD Tropical "
                      "Weather Outlooks")
     else:
-        outlook = "CLEAR — no active cyclonic precursors in scanned AS/BoB basins (model + IMD genesis scan)"
+        outlook = "CLEAR — no qualifying closed low detected in scanned AS/BoB basins (model + IMD genesis scan; troughs/circulations not counted)"
     lines.append(f"- 3-7 Day Severe Outlook: {outlook}")
     # State the 3h nowcast provenance explicitly. A Green 3h that drives an
     # AMBER verdict is load-bearing, so the reader must be able to see whether
@@ -665,7 +861,7 @@ def summarize(results: list[dict], region: str, run_date: str, severe: dict,
 
     # Lane 2: protocol footer — maps strategic/tactical to site directives
     if risk_profile:
-        pf = _protocol_footer(risk_profile)
+        pf = _protocol_footer(risk_profile, results=results)
         lines.append("")
         lines.append("=" * 64)
         lines.append("OPERATIONAL PROTOCOLS (ACTION DIRECTIVES)")
@@ -765,14 +961,77 @@ class OperationalRiskEngine:
                 'action_msg': 'All horizons clear or light precipitation.'}
         return {'status': 'GREEN — NOMINAL OPERATIONAL CONDITION', 'strategic': 'PROCEED', 'tactical': 'NORMAL_OPS', 'payload': 'LIGHT', 'action_msg': 'All horizons clear or light precipitation.'}
 
-def _protocol_footer(rp):
+def _protocol_footer(rp, results=None):
+    """Lane-level site directives, plus axis-specific clauses for what is LIVE.
+
+    The base table maps (strategic, tactical) -> site directives. That alone is
+    insufficient: it is keyed on the LANE, not on the HAZARD, so a cycle whose
+    only live signal is a thermal advisory or dense fog still printed
+    "ON-SITE=Standard operations" under PROCEED/NORMAL_OPS. For a shipping and
+    field-crew audience that is a live inaccuracy -- heat stress and visibility
+    change on-site protocol even when rainfall is Green.
+
+    So the base string is kept verbatim, and one clause per active hazard axis
+    is appended. No new fetch: everything here is already in the results
+    payload. Suppressed entirely when no axis is active, so a genuinely quiet
+    cycle keeps its terse one-line footer.
+    """
     F = {
         ('STANDBY','MONITOR'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Green-light transit; ON-SITE=Proceed with caution, visual 15-min radar; EMERGENCY=STANDBY dewatering.',
         ('HALT_OPERATIONS','EVACUATE'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Halt all movement, reroute freight; ON-SITE=Immediate halt outdoor/height work; EMERGENCY=Execute low-lying evacuations.',
         ('ALERT_SENSITIVE','VISUAL_VERIFY'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Proceed with caution, secondary comms; ON-SITE=Mandatory 30-min visual field-checks; EMERGENCY=Warm start emergency crews.',
         ('PROCEED','NORMAL_OPS'): 'OPERATIONAL PROTOCOLS: LOGISTICS=Nominal, standard schedules; ON-SITE=Standard operations; EMERGENCY=Monitor routine intervals.',
     }
-    return F.get((rp.get('strategic'), rp.get('tactical')), F[('PROCEED','NORMAL_OPS')])
+    base = F.get((rp.get('strategic'), rp.get('tactical')),
+                 F[('PROCEED', 'NORMAL_OPS')])
+    return base + _active_hazard_clauses(results)
+
+
+def _active_hazard_clauses(results):
+    """Append a directive per hazard axis that is actually live this cycle.
+
+    Deliberately axis-specific rather than severity-scaled: fog is a VISIBILITY
+    instruction, heat is a HYDRATION/SHADE instruction, and conflating them into
+    one generic "take care" line would lose the operational distinction that the
+    dual-axis matrix exists to preserve.
+    """
+    if not results:
+        return ""
+    thermal_adv, other_hazards, rain_alerts = [], [], []
+    for r in results:
+        nm = (r.get("name") or "?").upper()
+        hz = ((r.get("imd") or {}).get("hazards") or {})
+        th = hz.get("thermal") or {}
+        st = (th.get("status") or "").upper()
+        if st == "ADVISORY":
+            thermal_adv.append(nm)
+        elif st == "NOMINAL":
+            d = th.get("description") or ""
+            if d.startswith("non-thermal warning on IMD feed:"):
+                other_hazards.append(f"{nm}({d.split(':', 1)[1].strip()})")
+        pr = hz.get("precipitation") or {}
+        if str(pr.get("level") or "").lower() in ("yellow", "orange", "red"):
+            rain_alerts.append(nm)
+
+    clauses = []
+    if rain_alerts:
+        clauses.append(f"RAIN ACTIVE in {len(rain_alerts)} district(s) "
+                       f"[{', '.join(rain_alerts)}]: ON-SITE=secure loose "
+                       f"material, verify drainage; EMERGENCY=confirm dewatering "
+                       f"pumps primed.")
+    if thermal_adv:
+        clauses.append(f"THERMAL ADVISORY in {len(thermal_adv)} district(s) "
+                       f"[{', '.join(thermal_adv)}]: ON-SITE=mandatory hydration "
+                       f"and shaded rest at peak daylight; LOGISTICS=avoid "
+                       f"mid-day dispatch of heat-sensitive cargo.")
+    if other_hazards:
+        clauses.append(f"VISIBILITY/OTHER HAZARD {', '.join(other_hazards)}: "
+                       f"LOGISTICS=reduce convoy speed, use low-beam headlights; "
+                       f"ON-SITE=suspend crane and height work until visibility "
+                       f"clears.")
+    if not clauses:
+        return ""
+    return "  ||  " + "  ||  ".join(clauses)
 
 def compose_with_risk_profile(results, region, narrative=None, skill=None, bias_mm=None,
                               observed_status=None, nowcast_status=None, run_date=None,
@@ -801,6 +1060,6 @@ def compose_with_risk_profile(results, region, narrative=None, skill=None, bias_
     out.append('='*64)
     out.append('OPERATIONAL PROTOCOLS (ACTION DIRECTIVES)')
     out.append('='*64)
-    out.append(_protocol_footer(risk_profile if risk_profile else {'strategic':'PROCEED','tactical':'NORMAL_OPS'}))
+    out.append(_protocol_footer(risk_profile if risk_profile else {'strategic':'PROCEED','tactical':'NORMAL_OPS'}, results=results))
     out.append('=' * 64)
     return "\n".join(out)

@@ -23,6 +23,9 @@ BASE = HERE  # config/, engine/, output/ all live under weather-report-updater/
 from engine import fetch_openmeteo as om
 from engine import fetch_metno
 from engine import observed, fetch_imd_nowcast, fetch_imd, bias_correct, narrative
+from engine import thermal
+import engine.broadcast_state as broadcast_state
+from engine import dispatch
 from engine import intensity, antecedent, buffer, tides, terrain, radar
 import engine.sanity as sanity
 import engine.convective as convective
@@ -80,6 +83,40 @@ def main():
     # All degrade gracefully to "unavailable" — never fake, never raise.
     MH_DISTRICTS = {l.get("district", l["name"]).upper() for l in locs}
     MH_BBOX = (72.0, 15.0, 81.0, 23.0)  # Maharashtra + surrounds
+    # Thermal hazard axis (IMD per-city 7-day forecast). Fetched for all
+    # configured locations up front, concurrently, so a slow or dead station
+    # never stalls the district loop. Unmonitored districts come back
+    # NOT MONITORED; they are never assumed Green.
+    thermal_all = {}
+    try:
+        _tdate = dt.datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%b")
+        # Fault-injection profile: when SIMULATE_IMD_PAGE_OFFLINE is set, the
+        # IMD city-forecast page is fully offline (the real intermittent TLS
+        # drop we hit on this host). Patch the fetch so every station returns
+        # UNKNOWN (verified) / NOT MONITORED (unmonitored) — fail-closed:
+        # never Green, never a fabricated warning. The downstream dispatch is
+        # then verified to degrade gracefully instead of inventing an alert.
+        if os.environ.get("SIMULATE_IMD_PAGE_OFFLINE"):
+            from unittest import mock  # noqa: F401
+            import atexit
+            import requests
+            _pm = mock.patch.object(
+                thermal, "_fetch",
+                side_effect=requests.exceptions.SSLError(
+                    "SSL: UNEXPECTED_EOF_WHILE_READING"))
+            _pm.start()
+            atexit.register(_pm.stop)
+        thermal_all = thermal.thermal_by_location(cfg.get("locations", []), _tdate)
+        _adv = [n for n, p in thermal_all.items()
+                if (p or {}).get("status") == "Advisory"]
+        _nm = [n for n, p in thermal_all.items()
+               if (p or {}).get("status") == "NOT MONITORED"]
+        print(f"[*] thermal axis: {len(thermal_all)} locations | "
+              f"advisory={len(_adv)}{_adv if _adv else ''} | "
+              f"not-monitored={len(_nm)} (coverage gaps, not Green)")
+    except Exception as e:
+        thermal_all = {}
+        print(f"[!] thermal axis unavailable (non-fatal): {e}")
     # Primary severity source: IMD's own RENDERED warning map, one small tile
     # per monitored district, read concurrently. Palette-validated; a failed or
     # off-palette tile yields no severity for that district (never a guess).
@@ -176,6 +213,7 @@ def main():
         imd_geo = {"status": "unavailable"}
         imd_radar_frames = []
         imd_lag = {}
+        thermal_all = {}
         print(f"[!] IMD authoritative fetch failed (non-fatal): {e}")
 
 
@@ -274,6 +312,26 @@ def main():
         bc = bias_correct.correct(loc.get("district", name).upper(), acc)
         corrected = bc["corrected_mm"]
 
+        # --- TEMPORAL: when does the model peak? (no extra fetch) ----------
+        # Walk the same now-anchored hourly window the accumulation uses, take
+        # the max, and convert its index back to a wall-clock IST hour. On a dry
+        # day every hour is 0 and we report 0 with no time rather than inventing
+        # a peak hour that does not exist.
+        peak_mm, peak_at = 0.0, None
+        try:
+            _s = om.current_hour_offset()
+            _first = next(iter(pf.models.values())) if pf.models else {}
+            _seg = [x for x in (_first.get("precipitation") or [])[_s:_s + 24]
+                    if x is not None]
+            if _seg:
+                _pm = max(_seg)
+                peak_mm = round(float(_pm), 2)
+                if peak_mm > 0:
+                    _hr = (_s + _seg.index(_pm)) % 24
+                    peak_at = f"{_hr:02d}:00 IST"
+        except Exception:
+            pass
+
         # --- U2 IMD nowcast for this district ---
         district_u = loc.get("district", name).upper()
         nc = fetch_imd_nowcast.nowcast_for_district(nc_all, loc.get("district", name))
@@ -299,6 +357,11 @@ def main():
         imd_payload = {"colour": imd_colour, "color_code": imd_code,
                        "status": "ok" if imd_colour else imd_status,
                        "nowcast_colour": nc.get("color_label") if nc.get("found") else None,
+                       # TEMPORAL: IMD's nowcast validity window (toi/vupto, IST).
+                       # Fetched and stored by fetch_imd_nowcast but previously
+                       # never surfaced, so an operator could see a 3h colour
+                       # with no idea which 3 hours it covered.
+                       "nowcast_window": nc.get("validity_window") if nc.get("found") else None,
                        "message": nc.get("message", ""), "color": nc.get("color"),
                        "source": imd_source, "degraded": not imd_colour,
                        "rel_lag_min": imd_lag.get(_d_up),
@@ -306,6 +369,46 @@ def main():
                        # map? Disagreement is an upstream IMD signal, logged once
                        # per run, never shown as a second severity.
                        "wfs_attr": (imd_warn.get("warnings", {}).get(_d_up) or {}).get("color_label")}
+        # THERMAL is a SEPARATE hazard axis from precipitation. IMD publishes
+        # heat/humidity advisories on the per-city forecast page, not on the
+        # district rainfall layer, so a district can be Rain:Green while a formal
+        # hot-and-humid advisory is in force. Carried under a nested `hazards`
+        # key so neither axis can overwrite the other.
+        _th = (thermal_all or {}).get(name) or {}
+        imd_payload["hazards"] = {
+            "precipitation": {
+                "level": imd_colour,
+                "status": "Nominal" if imd_colour == "Green" else (imd_colour or "unavailable"),
+                "source": imd_source,
+            },
+            "thermal": {
+                "level": _th.get("level"),          # always None: IMD gives no colour here
+                "status": _th.get("status", "NOT MONITORED"),
+                "description": _th.get("description"),
+                "tmax_c": _th.get("tmax_c"),
+                "tmin_c": _th.get("tmin_c"),
+                "station": _th.get("station"),
+                "reason": _th.get("reason"),
+            },
+        }
+
+        # --- Step 1b: hazard-origin provenance (set once, before compose() and
+        # summarize() both render, so the chat and the report stay aligned):
+        # a hazard-agnostic GIS Yellow is never silently read as precipitation
+        # when the model grid is dry AND a thermal advisory is live.
+        _pct = imd_payload["colour"]
+        _th = imd_payload["hazards"]["thermal"]
+        _th_status = (_th.get("status") or "NOT MONITORED").upper()
+        _prov = {
+            "hazard_type": "precipitation",
+            "risk_note": None,
+        }
+        if (str(_pct).lower() in ("yellow", "orange", "red")
+                and corrected < 0.1 and _th_status == "ADVISORY"
+                and _th.get("tmax_c", 0) > 0):
+            _prov["hazard_type"] = "thermal-risk"
+            _prov["risk_note"] = ("dry model + active thermal advisory => Yellow is heat-risk provenance")
+        imd_payload["prov"] = _prov
 
         # --- Step 2: Intensity-Duration (IDF) burst analysis from hourly series ---
         inten = intensity.analyze(hourly_precip, window) if hourly_precip else {}
@@ -367,6 +470,10 @@ def main():
             "name": name, "type": loc.get("type"), "district": district_u,
             "raw_mm": round(acc, 2), "corrected_mm": corrected,
             "prob_max": round(prob, 1), "wind_kmh": w10, "wind_dir": wdir,
+            # TEMPORAL: the hour the model peaks, anchored to NOW (same
+            # current_hour_offset basis as the accumulation above) so the clock
+            # time is the real wall-clock hour, not a midnight-relative index.
+            "peak_mm": peak_mm, "peak_at_ist": peak_at,
             "wind850_kmh": w850d, "wind850_dir": w850dir, "cape": cape, "gust": gust,
             "imd": imd_payload, "observed": obs_d, "source": src,
             "bias_applied": bc["applied"],
@@ -783,13 +890,24 @@ def main():
         f.write(text + "\n")
     print(f"[*] report saved -> {os.path.join(OUT, 'report.md')}")
 
-    # deliver — concise one-paragraph summary as the chat text (Telegram's
-    # 4096-char limit rejects the full report; full report stays in report.md).
-    summary = report.summarize(results, cfg.get("region_focus", "Maharashtra"),
-                                today, sev, radar_status,
-                                analysis=analysis if analysis else {},
-                                risk_profile=risk_profile)
-    summary = _fold_long_text(summary, limit=4096)
+    # ---- One-glance Telegram dispatch (modulated multi-hazard tracker) ----
+    # report.md is the raw technical database; this dispatch is the user-facing
+    # summary. Every field is pulled from the live run state; no invented data
+    # (thermal tmax from IMD city feed, model peaks, severe outlook, radar,
+    # nowcast status), gap-only for El Niño / radar dBZ / seasonal norms.
+    dispatch_doc = {
+        "thermal_all": thermal_all,
+        "results": results,
+        "sev": sev,
+        "radar_status": radar_status,
+        "nowcast_status": nc_all["status"],
+        "cfg": cfg,
+        "today": today,
+    }
+    dispatch_summary = dispatch.build_one_glance_dispatch(dispatch_doc)
+    summary = _fold_long_text(dispatch_summary, limit=4096)
+    print(f"[*] one-glance dispatch length: {len(dispatch_summary)} chars "
+          f"(limit 4096)")
     print(f"[*] telegram text length: {len(summary)} chars (limit 4096)")
 
     # ── Adaptive delivery: lean by default, escalate on severity ──────────────
@@ -836,7 +954,31 @@ def main():
                 _mmr_mp4 = cp
             break
 
-    telegram.send_message(CHAT, summary, dry_run=DRY)
+    # Duplicate-broadcast suppression. GitHub Actions cron can fire late or
+    # twice close together on shared runners; when the matrix is unchanged,
+    # re-sending it is noise. Fail-open: a missing/corrupt state file suppresses
+    # nothing, because sending a briefing twice beats not sending it at all.
+    # Only applied on a REAL send -- a dry-run must never consume the
+    # fingerprint, or it would swallow the next genuine broadcast.
+    _suppressed = False
+    if DRY:
+        _prev = broadcast_state.last_sent_fingerprint()
+        if _prev is not None and _prev == broadcast_state.fingerprint(summary):
+            print("[*] broadcast suppressed: briefing identical to the last one sent "
+                  "(dry-run — fingerprint NOT consumed)")
+            _suppressed = True
+        else:
+            print("[*] dry-run: briefing differs from last sent (would broadcast)")
+    else:
+        if broadcast_state.should_suppress(summary):
+            print("[*] broadcast suppressed: briefing identical to the last one sent")
+            _suppressed = True
+
+    if not _suppressed:
+        telegram.send_message(CHAT, summary, dry_run=DRY)
+        if not DRY:
+            broadcast_state.mark_sent(summary)
+            print("[*] broadcast fingerprint recorded")
 
     # Choose looping video source: MP4 if transcode succeeded, else GIF fallback.
     _mmr_video = _mmr_mp4 if _mmr_mp4 and os.path.exists(_mmr_mp4) else None
@@ -976,24 +1118,63 @@ def _verify_outputs(OUT, delivery_severe, DRY):
 def _fold_long_text(text: str, limit: int = 4096, fold_marker: str = "\n[...]\n") -> str:
     """Hard-cap Telegram text at `limit` chars.
 
-    If the text exceeds the limit, prefer truncating within the least critical
-    tail section. We split on major section breaks and rebuild from the front,
-    dropping middle/last sections first.
+    Splits on major section breaks and rebuilds from the front, dropping the
+    LEAST critical sections first.
+
+    PRIORITY-AWARE, NOT PURELY SEQUENTIAL: the naive "keep the front, drop the
+    tail" order silently sacrificed the OPERATIONAL PROTOCOLS footer, because it
+    happens to be the last section. That footer is the single most
+    operationally important line in the briefing (it is what tells a crew to
+    secure material / hydrate / slow convoys), so losing it while keeping 782
+    chars of "grid analysis omitted (LIGHT payload)" boilerplate is exactly
+    backwards. Protected sections are pinned first; the droppable boilerplate is
+    what yields.
     """
     if len(text) <= limit:
         return text
     sections = [s.strip() for s in text.split("\n\n") if s.strip()]
     if not sections:
         return text[:limit]
-    rebuilt = [sections[0]]
-    total = len(sections[0])
-    for sec in sections[1:]:
-        if total + len(sec) + len(fold_marker) <= limit:
-            rebuilt.append(sec)
-            total += len(sec) + len(fold_marker)
-        else:
-            break
-    return ("\n\n".join(rebuilt) + fold_marker + "Full report in report.md").strip()
+
+    # Sections that must survive if at all possible, identified by header.
+    _PROTECT = ("OPERATIONAL PROTOCOLS (ACTION DIRECTIVES)",)
+    _DROPPABLE = ("SYSTEMIC INSIGHT", "SYNOPTIC VALIDATION")
+
+    def _tag(s):
+        head = s.splitlines()[0] if s.splitlines() else ""
+        if any(p in s for p in _PROTECT):
+            return "protect"
+        if any(d in head for d in _DROPPABLE):
+            return "droppable"
+        return "normal"
+
+    protected = [s for s in sections if _tag(s) == "protect"]
+    normal = [s for s in sections if _tag(s) == "normal"]
+    droppable = [s for s in sections if _tag(s) == "droppable"]
+
+    def _fits(kept):
+        return sum(len(s) for s in kept) + len(fold_marker) * max(0, len(kept) - 1) <= limit
+
+    # Fill in original order, but only from what is still available.
+    order = normal + droppable
+    kept = [s for s in sections if _tag(s) == "protect"]
+    if not _fits(kept):
+        # Even the protected set alone overflows: keep as much as fits.
+        kept, _acc = [], 0
+        for s in protected:
+            if _acc + len(s) <= limit:
+                kept.append(s); _acc += len(s)
+        return (fold_marker.join(kept) + fold_marker + "Full report in report.md").strip()
+    for s in order:
+        if _tag(s) == "droppable":
+            continue
+        if _fits(kept + [s]):
+            kept.append(s)
+    # Re-emit in the ORIGINAL document order so the briefing still reads top-down.
+    kept = [s for s in sections if s in kept]
+    if _fits(kept + droppable[:1]):
+        pass  # space remained; boilerplate can stay too
+    return (fold_marker.join(kept) + fold_marker + "Full report in report.md").strip()
 
 
 if __name__ == "__main__":

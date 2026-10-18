@@ -3,16 +3,22 @@
   "models": ["ecmwf_ifs", "icon_global", "gfs_seamless"],
   "forecast_days": 2,
   "accum_window_h": 24,
+  "thermal_hazard": {
+    "_comment": "Thermal (heat/humidity) is a SEPARATE hazard axis from precipitation. Precipitation severity comes from the IMD rendered warning map (WMS, palette-validated). Thermal comes from IMD's per-city 7-day forecast page, which carries warning PROSE ONLY -- no colour. So thermal level is always null and the literal IMD text is reported. An unmonitored district is never assumed Green.",
+    "station_ids_verified_against": "IMD city page title + RMC transmission log (city.imd.gov.in/dashboard/transmet)",
+    "not_monitored_note": "Thane, Navi Mumbai (Raigad) and Kolhapur have no IMD city-forecast station. They are reported NOT MONITORED, never Green.",
+    "image_index_note": "IMD's warning_images/N.png is a set of decorative sky-condition illustrations (mixed sizes 391x340 to 278x283, colours green/white/cream/blue -- no red or orange). It is NOT a severity scale and is deliberately not read."
+  },
   "locations": [
-    {"name": "Mumbai",        "lat": 19.076, "lon": 72.877, "state": "Maharashtra", "district": "MUMBAI SUBURBAN", "type": "coastal"},
-    {"name": "Thane",         "lat": 19.186, "lon": 72.966, "state": "Maharashtra", "district": "THANE", "type": "coastal"},
-    {"name": "Navi Mumbai",   "lat": 19.033, "lon": 73.029, "state": "Maharashtra", "district": "RAIGAD", "type": "coastal"},
-    {"name": "Pune",          "lat": 18.520, "lon": 73.856, "state": "Maharashtra", "district": "PUNE", "type": "inland"},
-    {"name": "Nashik",        "lat": 20.000, "lon": 73.789, "state": "Maharashtra", "district": "NASHIK", "type": "inland"},
-    {"name": "Nagpur",        "lat": 21.146, "lon": 79.087, "state": "Maharashtra", "district": "NAGPUR", "type": "inland"},
-    {"name": "Aurangabad",    "lat": 19.876, "lon": 75.343, "state": "Maharashtra", "district": "AURANGABAD", "type": "inland"},
-    {"name": "Kolhapur",      "lat": 16.706, "lon": 74.243, "state": "Maharashtra", "district": "KOLHAPUR", "type": "inland"},
-    {"name": "Ratnagiri",     "lat": 16.990, "lon": 73.312, "state": "Maharashtra", "district": "RATNAGIRI", "type": "coastal"},
-    {"name": "Solapur",       "lat": 17.660, "lon": 75.906, "state": "Maharashtra", "district": "SOLAPUR", "type": "arid"}
+    {"name": "Mumbai",        "lat": 19.076, "lon": 72.877, "state": "Maharashtra", "district": "MUMBAI SUBURBAN", "type": "coastal", "imd_station_id": 43003},
+    {"name": "Thane",         "lat": 19.186, "lon": 72.966, "state": "Maharashtra", "district": "THANE", "type": "coastal", "imd_station_id": null, "thermal_coverage_note": "no IMD city-forecast station (rolls into Greater Mumbai)"},
+    {"name": "Navi Mumbai",   "lat": 19.033, "lon": 73.029, "state": "Maharashtra", "district": "RAIGAD", "type": "coastal", "imd_station_id": null, "thermal_coverage_note": "no IMD city-forecast station"},
+    {"name": "Pune",          "lat": 18.520, "lon": 73.856, "state": "Maharashtra", "district": "PUNE", "type": "inland", "imd_station_id": 43063},
+    {"name": "Nashik",        "lat": 20.000, "lon": 73.789, "state": "Maharashtra", "district": "NASHIK", "type": "inland", "imd_station_id": 42921},
+    {"name": "Nagpur",        "lat": 21.146, "lon": 79.087, "state": "Maharashtra", "district": "NAGPUR", "type": "inland", "imd_station_id": 42867},
+    {"name": "Aurangabad",    "lat": 19.876, "lon": 75.343, "state": "Maharashtra", "district": "AURANGABAD", "type": "inland", "imd_station_id": 43014},
+    {"name": "Kolhapur",      "lat": 16.706, "lon": 74.243, "state": "Maharashtra", "district": "KOLHAPUR", "type": "inland", "imd_station_id": null, "thermal_coverage_note": "no IMD city-forecast station"},
+    {"name": "Ratnagiri",     "lat": 16.990, "lon": 73.312, "state": "Maharashtra", "district": "RATNAGIRI", "type": "coastal", "imd_station_id": 43110},
+    {"name": "Solapur",       "lat": 17.660, "lon": 75.906, "state": "Maharashtra", "district": "SOLAPUR", "type": "arid", "imd_station_id": 43117}
   ]
 }

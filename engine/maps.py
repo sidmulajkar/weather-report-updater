@@ -116,13 +116,21 @@ def rainfall_map(locations_with_vals, model_label="ECMWF", out_path="output/rain
     lats = np.array([l["lat"] for l in locations_with_vals])
     lons = np.array([l["lon"] for l in locations_with_vals])
     z = np.array([l.get("accum_24h", 0.0) for l in locations_with_vals], dtype=float)
+    max_detected_rain = float(np.nanmax(z)) if z.size else 0.0
+    # KEY DESIGN FIX: do NOT auto-compress the colour scale to a sub-mm range
+    # (the previous 0.0000-0.0096 mm stretch made an operationally dry field
+    # render as a dark plume). Floor the colour scale so a dry/mostly-dry day
+    # renders visually dry instead of extrapolating beyond a meaningful
+    # rainfall threshold.
+    vmax_floor = max(max_detected_rain, 5.0)
     fig, ax = plt.subplots(figsize=(8, 8))
     cmap = LinearSegmentedColormap.from_list("imd", INDIA_RAMP)
+    norm = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_floor)
     if len(z) >= 3:
         tri = Triangulation(lons, lats)
-        cs = ax.tricontourf(tri, z, levels=18, cmap=cmap, extend="max")
+        cs = ax.tricontourf(tri, z, levels=18, cmap=cmap, norm=norm, extend="max")
     else:
-        cs = ax.scatter(lons, lats, c=z, cmap=cmap, s=80)
+        cs = ax.scatter(lons, lats, c=z, cmap=cmap, s=80, norm=norm)
     fig.colorbar(cs, ax=ax, label="24h rainfall (mm)")
     # de-overlap labels: cluster nearby points and fan them vertically
     pts = sorted(locations_with_vals, key=lambda l: (round(l["lat"], 2), l["lon"]))
@@ -612,23 +620,74 @@ def _add_simple_geo_base(ax, locs=None, dark=False):
             data = json.load(f)
     except Exception:
         return
-    edge = "#455a64" if dark else "#bbbbbb"
+    # Boundary contrast: was #bbbbbb at linewidth 0.6. That hairline rendered
+    # correctly at native dpi but nearly vanished once the panel was embedded
+    # into the dpi=140 composite and viewed at phone scale -- the panel read as
+    # "sparse" on a quick glance even though the geometry was all there.
+    # Verified against a 2x native-resolution crop before changing this:
+    # boundaries were continuous but low-contrast, labels sharp, no dpi
+    # artifacts. Darkened to a mid-grey and thickened slightly so the outlines
+    # survive downscaling without becoming visually loud.
+    edge = "#455a64" if dark else "#9e9e9e"
     fill = "#1a1d24" if dark else "#f0f0f0"
+    # ── BATCHED COLLECTION (was 704 individual add_patch calls) ────────────
+    # Every ax.add_patch() recomputes the axes data limits
+    # (_update_patch_limits), so adding ~350 polygons one-by-one makes
+    # matplotlib redo the boundary math ~350 times per map. That was ~17-23s of
+    # pure recomputation across the two maps that use this base. Collecting all
+    # exterior rings into ONE PathCollection means the limit recalculation
+    # happens once. GeoJSON lon/lat maps directly to matplotlib's x/y, so no
+    # coordinate conversion is needed.
+    from matplotlib.collections import PathCollection
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch
+
+    verts, codes = [], []
     drawn = 0
     for name, info in data.items():
-        geom = info.get("geometry")
+        geom = (info or {}).get("geometry")
         if not geom:
             continue
-        try:
-            for patch in _poly_patches(geom, fill, edge):
-                patch.set_linewidth(0.6)
-                patch.set_zorder(1)
-                ax.add_patch(patch)
-            drawn += 1
-        except Exception:
-            pass
+        # Only exterior rings are ever drawn by _poly_patches (holes are
+        # dropped there too), so this is visually identical.
+        rings = []
+        t = geom.get("type")
+        coords = geom.get("coordinates", []) or []
+        if t == "Polygon":
+            rings.append(coords[0])
+        elif t == "MultiPolygon":
+            for poly in coords:
+                rings.append(poly[0])
+        for ring in rings:
+            try:
+                pts = [(float(pt[0]), float(pt[1])) for pt in ring]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if len(pts) < 3:
+                continue
+            verts.extend(pts)
+            codes.append(Path.MOVETO)
+            codes.extend([Path.LINETO] * (len(pts) - 1))
+            # CLOSEPOLY is ignored as a VERTEX but still consumes a code slot,
+            # so append the first point again to keep len(verts) == len(codes).
+            # Getting this wrong raises:
+            #   ValueError: 'codes' must be a 1D list ... with the same length
+            verts.append(pts[0])
+            codes.append(Path.CLOSEPOLY)
+        drawn += 1
         if drawn > 200:
             break
+
+    if verts:
+        coll = PathCollection(
+            [Path(verts, codes)],
+            facecolor=fill, edgecolor=edge, linewidth=0.9, zorder=1,
+            antialiased=True,
+        )
+        # PathCollection has no set_zorder/set_linewidth passthrough used by the
+        # old loop; both are set at construction above.
+        ax.add_collection(coll)
+        ax.autoscale_view()
     try:
         coast = [
             (72.8, 18.95), (72.85, 19.0), (72.9, 19.05), (73.0, 19.1),
@@ -934,31 +993,55 @@ def compile_consolidated_visual_briefs(out_dir, grid_maps, issued_ist="", radar_
         # fallback: use nowcast_map if no radar frames available
         radar_src = [by_base.get("nowcast_map.png")] if by_base.get("nowcast_map.png") else []
 
+    # ── ANIMATION LOOP — single reusable canvas ────────────────────────────
+    # Previously this allocated a fresh Figure + Axes and re-decoded the SAME
+    # static MMR PNG on EVERY one of ~40 radar frames. Only the right panel
+    # changes between frames, so that was 40 redundant PNG decodes, 40 figure
+    # allocations and 40 tight_layout passes on identical geometry — the single
+    # biggest compute cost in the run, and the reason the orchestrator sat in
+    # futures.result() for the bulk of the pipeline. Now the figure and the
+    # static left panel are built ONCE and only the right axis is redrawn.
+    #
+    # Radar frames are capped: 40 frames at dpi=140 / figsize=(15,7) produces a
+    # multi-megabyte GIF for a phone screen, and the "radar is moving" signal
+    # survives fine at a fraction of the frames. Override with
+    # MMR_MAX_FRAMES to raise it back.
+    _max_frames = int(os.environ.get("MMR_MAX_FRAMES", "12") or 12)
+    if len(radar_src) > _max_frames > 0:
+        _step = len(radar_src) / float(_max_frames)
+        radar_src = [radar_src[int(i * _step)] for i in range(_max_frames)]
+
+    _RADAR_TITLE = "IMD Doppler Radar Mosaic (observed reflectivity)"
+    _MMR_TITLE = "Mumbai Metro Region 0.1deg Zoom (+ outfalls)"
+    fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
+
+    # Static left panel: decode once, draw once, never touch again.
+    axes2[0].axis("off")
+    try:
+        axes2[0].imshow(mpimg.imread(p_mmr))
+        axes2[0].set_title(_MMR_TITLE, fontsize=10)
+    except Exception:
+        axes2[0].set_title("MMR zoom (missing)", fontsize=10)
+
+    fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
+    fig2.tight_layout(pad=3.0)
+
     for idx, rf in enumerate(radar_src):
-        fig2, axes2 = plt.subplots(1, 2, figsize=(15, 7), dpi=140)
-        # Left: static MMR zoom
-        try:
-            img_mmr = mpimg.imread(p_mmr)
-            axes2[0].imshow(img_mmr)
-            axes2[0].set_title("Mumbai Metro Region 0.1deg Zoom (+ outfalls)", fontsize=10)
-        except Exception:
-            axes2[0].set_title("MMR zoom (missing)"); axes2[0].axis("off")
-        axes2[0].axis("off")
-        # Right: radar frame
+        axes2[1].clear()          # only the dynamic panel is redrawn per frame
         if rf and os.path.exists(rf):
             try:
-                img_radar = mpimg.imread(rf)
-                axes2[1].imshow(img_radar); axes2[1].axis("off")
-                axes2[1].set_title("IMD Doppler Radar Mosaic (observed reflectivity)", fontsize=10)
+                axes2[1].imshow(mpimg.imread(rf))
+                axes2[1].set_title(_RADAR_TITLE, fontsize=10)
             except Exception:
-                axes2[1].set_title("Radar (missing)"); axes2[1].axis("off")
+                axes2[1].set_title("Radar (missing)", fontsize=10)
         else:
-            axes2[1].set_title("Radar (unavailable)"); axes2[1].axis("off")
-        fig2.suptitle("MMR ASSET & NOWCAST MONITOR", fontsize=13, fontweight="bold")
-        fig2.tight_layout(pad=3.0)
-        frame_path = os.path.join(_frames_dir, f"frame_{idx:03d}.png")
-        fig2.savefig(frame_path, bbox_inches="tight"); plt.close(fig2)
-        frame_paths.append(frame_path)
+            axes2[1].set_title("Radar (unavailable)", fontsize=10)
+        axes2[1].axis("off")
+        fig2.savefig(os.path.join(_frames_dir, f"frame_{idx:03d}.png"),
+                     bbox_inches="tight")
+        frame_paths.append(os.path.join(_frames_dir, f"frame_{idx:03d}.png"))
+
+    plt.close(fig2)
 
     if not frame_paths:
         # no frames at all -> create a single-frame GIF placeholder
